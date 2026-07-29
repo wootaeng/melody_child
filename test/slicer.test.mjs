@@ -51,6 +51,25 @@ test('배경 잡음이 섞여도 버스트 개수를 찾는다', () => {
   assert.equal(sliceSyllables(noisy, SR).length, DEV_SAMPLE_F0S.length);
 });
 
+test('충격음이 섞여도 조용한 발화를 잃지 않는다', () => {
+  // 10ms 스파이크(진폭 1.0) + 200ms 발화(진폭 0.05).
+  // 스파이크가 기준을 정하면 발화가 전부 임계값 미달이 되어 사라진다.
+  const n = Math.round(0.6 * SR);
+  const s = new Float32Array(n);
+  for (let i = 0; i < Math.round(0.01 * SR); i++) s[i] = i % 2 ? 1 : -1;
+  const from = Math.round(0.3 * SR);
+  for (let i = from; i < from + Math.round(0.2 * SR); i++) {
+    s[i] = 0.05 * Math.sin((2 * Math.PI * 220 * i) / SR);
+  }
+  const segs = sliceSyllables(s, SR);
+  assert.equal(segs.length, 1, `조각 ${segs.length}개 — 발화가 사라졌다`);
+  const len = segs[0].end - segs[0].start;
+  assert.ok(
+    len >= Math.round(0.15 * SR),
+    `발화 조각이 너무 짧다: ${((len / SR) * 1000).toFixed(0)}ms`,
+  );
+});
+
 test('무음 구간이 없는 연속 음성도 버퍼 끝까지 한 조각으로 검출한다', () => {
   const n = SR; // 1초 내내 소리
   const s = new Float32Array(n);
