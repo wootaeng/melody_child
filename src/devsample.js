@@ -1,7 +1,7 @@
 // 마이크 없이 파이프라인을 검증하기 위한 합성 신호.
 // 사람 모음처럼 f0가 뚜렷하도록 기본음 + 2·3배음을 섞고, 음절처럼 무음으로 구분한다.
 
-export const DEV_SAMPLE_F0S = [220, 262, 220, 196, 247, 220];
+export const DEV_SAMPLE_F0S = Object.freeze([220, 262, 220, 196, 247, 220]);
 export const DEV_SAMPLE_BURST_SEC = 0.25;
 export const DEV_SAMPLE_GAP_SEC = 0.12;
 
