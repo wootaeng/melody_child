@@ -12,7 +12,7 @@
 // 분석 창은 `maxLag * 2`(기본값 48kHz에서 28.5ms)로 고정된다. 음절이 300ms여도
 // 앞 28.5ms만 본다 — 음절 시작부의 음높이를 그 음절의 대표값으로 쓰는 것이다.
 
-export function detectF0(samples, sampleRate, opts = {}) {
+export function detectF0Detail(samples, sampleRate, opts = {}) {
   const { minHz = 70, maxHz = 1000, minClarity = 0.3 } = opts;
 
   const minLag = Math.max(2, Math.floor(sampleRate / maxHz));
@@ -65,5 +65,47 @@ export function detectF0(samples, sampleRate, opts = {}) {
   const best = peaks.reduce((a, b) => (b.c > a.c ? b : a));
   if (best.c < minClarity) return null;
   const picked = peaks.find((p) => p.c >= best.c * 0.9);
-  return sampleRate / picked.lag;
+  return { hz: sampleRate / picked.lag, clarity: best.c };
+}
+
+export function detectF0(samples, sampleRate, opts = {}) {
+  const detail = detectF0Detail(samples, sampleRate, opts);
+  return detail ? detail.hz : null;
+}
+
+const MIN_GRAIN_PERIODS = 3;
+
+// 음절에서 유지음으로 쓸 그레인을 찾는다.
+//
+// 음절 전체를 하나의 비율로 밀면 그 안의 억양이 살아남아 음정이 흐른다
+// (실측: 한 음 안에서 172→86→177Hz, 곡 전체 3옥타브 산포). 안정 구간의 짧은
+// 그레인을 주기의 정수배로 잘라 루프하면 음정이 고정되고 이음매도 매끄럽다.
+//
+// 앞 35%는 건너뛴다 — 자음과 성문 어택이 있어 가장 불안정한 구간이다.
+export function findGrain(samples, sampleRate, seg, opts = {}) {
+  const { skipHead = 0.35, windowMs = 70, minClarity = 0.5 } = opts;
+
+  const win = Math.round((sampleRate * windowMs) / 1000);
+  const from = seg.start + Math.floor((seg.end - seg.start) * skipHead);
+  if (seg.end - from < win) return null;
+
+  const hop = Math.max(1, Math.floor(win / 2));
+  let best = null;
+  for (let s = from; s + win <= seg.end; s += hop) {
+    const detail = detectF0Detail(samples.subarray(s, s + win), sampleRate);
+    if (detail && detail.clarity >= minClarity && (!best || detail.clarity > best.clarity)) {
+      best = { start: s, hz: detail.hz, clarity: detail.clarity };
+    }
+  }
+  if (!best) return null;
+
+  // 주기의 정수배로 자른다 — 루프 이음매에서 파형이 이어지도록
+  const period = sampleRate / best.hz;
+  let periods = Math.floor(win / period);
+  while (periods >= MIN_GRAIN_PERIODS && best.start + Math.round(periods * period) > seg.end) {
+    periods -= 1;
+  }
+  if (periods < MIN_GRAIN_PERIODS) return null;
+
+  return { start: best.start, end: best.start + Math.round(periods * period), f0: best.hz };
 }

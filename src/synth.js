@@ -5,39 +5,50 @@ const ACCOMP_GAIN = 0.5; // 목소리보다 약 6dB 낮게 — 가사가 묻히�
 // 같은 값을 써야 한다 — 따로 두면 한쪽만 고쳤을 때 꼬리가 잘린다.
 const TAIL_SEC = 0.5;
 
-// 조각 하나를 목표 음정·목표 길이로 스케줄링한다.
-// 재생 속도를 바꾸면 길이도 함께 바뀌므로(Web Audio는 playbackRate와 detune을
-// 곱해 하나의 속도로 합산한다), 부족한 길이는 조각 후반을 루프해 채운다.
-function scheduleSegment(ctx, dest, buffer, seg, rate, when, noteSec) {
-  const sr = buffer.sampleRate;
-  const segSec = (seg.end - seg.start) / sr;
-  const playableSec = segSec / rate;
+const NOTE_GAP = 0.15; // 음 사이 여백 비율 — 없으면 음이 붙어 박자가 안 들린다
 
-  const src = ctx.createBufferSource();
-  src.buffer = buffer;
-  src.playbackRate.value = rate;
+function scheduleSegment(ctx, dest, buffer, seg, grain, targetHz, when, noteSec) {
+  const sr = buffer.sampleRate;
+  const sounding = Math.max(0.06, noteSec * (1 - NOTE_GAP));
 
   const gain = ctx.createGain();
-  const attack = 0.008;
-  const release = 0.02;
   gain.gain.setValueAtTime(0, when);
-  gain.gain.linearRampToValueAtTime(1, when + attack);
-  gain.gain.setValueAtTime(1, when + Math.max(attack, noteSec - release));
-  gain.gain.linearRampToValueAtTime(0, when + noteSec);
-
-  src.connect(gain);
+  gain.gain.linearRampToValueAtTime(1, when + 0.006);
+  gain.gain.setValueAtTime(1, when + sounding * 0.75);
+  gain.gain.linearRampToValueAtTime(0, when + sounding);
   gain.connect(dest);
 
-  if (playableSec >= noteSec) {
-    src.start(when, seg.start / sr, noteSec * rate);
-  } else {
-    // 뒤쪽 60%를 루프 구간으로 — 모음의 안정된 부분이 여기 있다
-    src.loop = true;
-    src.loopStart = seg.start / sr + segSec * 0.4;
-    src.loopEnd = seg.end / sr;
-    src.start(when, seg.start / sr);
-    src.stop(when + noteSec);
+  if (!grain) {
+    // 무성음(ㅅ·ㅋ 등): 음정 이동을 포기하고 원음 그대로 — 리듬만 맞춘다
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(gain);
+    src.start(when, seg.start / sr, Math.min(sounding, (seg.end - seg.start) / sr));
+    return;
   }
+
+  const rate = targetHz / grain.f0;
+  const attackSec = Math.min((grain.start - seg.start) / sr, sounding * 0.35);
+  const hasAttack = attackSec > 0.015;
+
+  // 자음은 원음 속도로 — 단어의 흔적이 여기 남는다
+  if (hasAttack) {
+    const head = ctx.createBufferSource();
+    head.buffer = buffer;
+    head.connect(gain);
+    head.start(when, seg.start / sr, attackSec);
+  }
+
+  // 유지음: 주기의 정수배 그레인을 루프해 음정을 고정한다
+  const body = ctx.createBufferSource();
+  body.buffer = buffer;
+  body.playbackRate.value = rate;
+  body.loop = true;
+  body.loopStart = grain.start / sr;
+  body.loopEnd = grain.end / sr;
+  body.connect(gain);
+  body.start(when + (hasAttack ? attackSec * 0.8 : 0), grain.start / sr);
+  body.stop(when + sounding);
 }
 
 function makeNoiseBuffer(ctx) {
@@ -61,13 +72,15 @@ function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat, startTime)
       osc.type = 'triangle';
       osc.frequency.value = midiToHz(chord.rootMidi + semitone);
       const gain = ctx.createGain();
+      // 패드는 마디를 다 채우지 않는다 — 목소리 사이 여백이 들려야 박자가 생긴다
+      const padDur = dur * 0.6;
       gain.gain.setValueAtTime(0, when);
-      gain.gain.linearRampToValueAtTime(0.12, when + 0.05);
-      gain.gain.linearRampToValueAtTime(0, when + dur);
+      gain.gain.linearRampToValueAtTime(0.1, when + 0.04);
+      gain.gain.linearRampToValueAtTime(0, when + padDur);
       osc.connect(gain);
       gain.connect(dest);
       osc.start(when);
-      osc.stop(when + dur);
+      osc.stop(when + padDur);
     }
   }
 
@@ -82,7 +95,7 @@ function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat, startTime)
     hp.type = 'highpass';
     hp.frequency.value = 6000;
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(beat % 1 === 0 ? 0.09 : 0.045, when);
+    gain.gain.setValueAtTime(beat % 1 === 0 ? 0.16 : 0.09, when);
     gain.gain.exponentialRampToValueAtTime(0.001, when + 0.05);
     src.connect(hp);
     hp.connect(gain);
@@ -92,7 +105,7 @@ function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat, startTime)
   }
 }
 
-export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }, startTime = 0) {
+export function buildGraph(ctx, { audioBuffer, segments, grains, melody, chords }, startTime = 0) {
   if (segments.length !== melody.notes.length) {
     throw new RangeError(
       `segments(${segments.length})와 notes(${melody.notes.length}) 개수가 다르다 — 호출 전에 정규화할 것`,
@@ -113,19 +126,21 @@ export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }, 
   accompBus.gain.value = ACCOMP_GAIN;
   accompBus.connect(master);
 
+  // 각 음이 언제 울리는지 함께 돌려준다. 화면에서 음절 구슬을 소리에 맞춰 켜려면
+  // 이 시각이 필요하고, UI가 따로 계산하면 타이밍 로직이 두 곳으로 갈라진다.
+  const noteTimes = [];
+
   let when = startTime;
   melody.notes.forEach((note, i) => {
-    const f0 = f0s[i];
-    // f0가 null인 조각(무성 자음)은 음정 이동을 포기하고 원음 그대로 — 리듬만 맞춘다
-    const rate = f0 ? midiToHz(note.midi) / f0 : 1;
+    noteTimes.push(when);
     const noteSec = note.beats * secPerBeat;
-    scheduleSegment(ctx, voiceBus, audioBuffer, segments[i], rate, when, noteSec);
+    scheduleSegment(ctx, voiceBus, audioBuffer, segments[i], grains[i], midiToHz(note.midi), when, noteSec);
     when += noteSec;
   });
 
   scheduleAccompaniment(ctx, accompBus, melody, chords, secPerBeat, startTime);
 
-  return { durationSec: when - startTime + TAIL_SEC, master };
+  return { durationSec: when - startTime + TAIL_SEC, master, noteTimes };
 }
 
 // resume 직후 currentTime이 0에 머물다가 오디오 스레드가 돌기 시작할 때 크게 앞으로

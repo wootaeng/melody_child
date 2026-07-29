@@ -1,5 +1,5 @@
 import { sliceSyllables } from './slicer.js';
-import { detectF0 } from './pitch.js';
+import { detectF0, findGrain } from './pitch.js';
 import { composeMelody, chordsFor, VERSE_LEN } from './composer.js';
 import { buildGraph, renderOffline, safeStartTime } from './synth.js';
 import { encodeWav } from './exporter.js';
@@ -11,12 +11,13 @@ const MIN_NOTES = VERSE_LEN; // 최소 한 절
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
 
-let session = null; // { audioBuffer, segments, f0s, transcript, rawCount, referenceHz, melody, chords }
+let session = null; // { audioBuffer, segments, grains, transcript, rawCount, referenceHz, melody, chords }
 let seed = 1;
 let handle = null;
 let audioCtx = null;
 let playingMaster = null;
 let playToken = 0;
+let beadRaf = 0;
 
 function show(name) {
   for (const [key, node] of Object.entries(screens)) {
@@ -37,17 +38,104 @@ function normalizeSegments(segments) {
   return out;
 }
 
-function drawWaveform(samples, segments) {
-  const canvas = el('waveform');
+const COLOR = {
+  card: '#fdfefd',
+  ink: '#16323c',
+  voice: '#f0654a',
+  voiceRest: '#f6c5b6',
+  rule: '#b9d4ca',
+};
+
+// 캔버스를 화면에 보이는 크기 × 픽셀비로 맞춘다. 이걸 안 하면 구슬이 흐려진다.
+function fitCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const box = canvas.getBoundingClientRect();
+  const w = Math.max(1, Math.round(box.width * dpr));
+  const h = Math.max(1, Math.round(box.height * dpr));
+  // 크기가 그대로면 건드리지 않는다 — 매 프레임 재할당하면 재생 중 버벅인다
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
   const ctx = canvas.getContext('2d');
-  const { width, height } = canvas;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, width: box.width, height: box.height };
+}
+
+// 시그니처 요소. 음절 하나가 구슬 하나, 높이가 음높이, 크기가 음 길이다.
+// melody가 없으면(아직 말하기 전) 점선만 그려 자리를 알려준다.
+function drawBeads(melody, activeIndex = -1) {
+  const { ctx, width, height } = fitCanvas(el('beads'));
   ctx.clearRect(0, 0, width, height);
 
-  ctx.fillStyle = '#e8f0fe';
+  const padX = 14;
+  const midY = height / 2;
+
+  if (!melody) {
+    ctx.strokeStyle = COLOR.rule;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 9]);
+    ctx.beginPath();
+    ctx.moveTo(padX, midY);
+    ctx.lineTo(width - padX, midY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    return;
+  }
+
+  const notes = melody.notes;
+  const midis = notes.map((n) => n.midi);
+  const low = Math.min(...midis);
+  const span = Math.max(1, Math.max(...midis) - low);
+  const top = 26;
+  const bottom = height - 26;
+
+  const xAt = (i) => padX + ((width - padX * 2) * i) / Math.max(1, notes.length - 1);
+  const yAt = (i) => bottom - ((midis[i] - low) / span) * (bottom - top);
+
+  // 절 경계 눈금 — 같은 곡조가 여기서 다시 시작한다는 사실을 표시한다
+  ctx.strokeStyle = COLOR.rule;
+  ctx.lineWidth = 1;
+  for (let i = melody.verseLen; i < notes.length; i += melody.verseLen) {
+    const x = (xAt(i - 1) + xAt(i)) / 2;
+    ctx.beginPath();
+    ctx.moveTo(x, top - 12);
+    ctx.lineTo(x, bottom + 12);
+    ctx.stroke();
+  }
+
+  // 구슬을 잇는 실
+  ctx.strokeStyle = COLOR.rule;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  notes.forEach((_, i) => (i ? ctx.lineTo(xAt(i), yAt(i)) : ctx.moveTo(xAt(i), yAt(i))));
+  ctx.stroke();
+
+  notes.forEach((note, i) => {
+    const r = note.beats >= 1 ? 8 : 5.5;
+    const isActive = i === activeIndex;
+    ctx.beginPath();
+    ctx.arc(xAt(i), yAt(i), isActive ? r + 3 : r, 0, Math.PI * 2);
+    ctx.fillStyle = isActive ? COLOR.voice : COLOR.voiceRest;
+    ctx.fill();
+    if (isActive) {
+      ctx.strokeStyle = COLOR.card;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+  });
+}
+
+function drawWaveform(samples, segments) {
+  const { ctx, width, height } = fitCanvas(el('waveform'));
+
+  ctx.fillStyle = COLOR.card;
   ctx.fillRect(0, 0, width, height);
 
   const step = Math.max(1, Math.floor(samples.length / width));
-  ctx.strokeStyle = '#3b6fd4';
+  ctx.strokeStyle = COLOR.ink;
+  ctx.globalAlpha = 0.45;
+  ctx.lineWidth = 1;
   ctx.beginPath();
   for (let x = 0; x < width; x++) {
     let peak = 0;
@@ -55,14 +143,15 @@ function drawWaveform(samples, segments) {
     for (let i = from; i < from + step && i < samples.length; i++) {
       peak = Math.max(peak, Math.abs(samples[i]));
     }
-    const h = peak * height * 0.45;
+    const h = peak * height * 0.42;
     ctx.moveTo(x, height / 2 - h);
     ctx.lineTo(x, height / 2 + h);
   }
   ctx.stroke();
+  ctx.globalAlpha = 1;
 
-  ctx.strokeStyle = '#d94f4f';
-  ctx.lineWidth = 1;
+  // 음절 경계 — 어디서 잘렸는지가 곧 음이 몇 개인지다
+  ctx.strokeStyle = COLOR.voice;
   for (const seg of segments) {
     for (const pos of [seg.start, seg.end]) {
       const x = (pos / samples.length) * width;
@@ -72,11 +161,6 @@ function drawWaveform(samples, segments) {
       ctx.stroke();
     }
   }
-}
-
-function medianF0(f0s) {
-  const voiced = f0s.filter((f) => f !== null).sort((a, b) => a - b);
-  return voiced.length ? voiced[Math.floor(voiced.length / 2)] : null;
 }
 
 // 멜로디는 한 곳에서만 만든다. 재생·저장·안내 문구가 같은 곡을 봐야 한다.
@@ -92,16 +176,58 @@ function analyze(audioBuffer, transcript) {
   if (found.length === 0) return null;
 
   const segments = normalizeSegments(found);
-  const f0s = segments.map((seg) => detectF0(samples.subarray(seg.start, seg.end), sampleRate));
-  drawWaveform(samples, found);
-  return { audioBuffer, segments, f0s, transcript, rawCount: found.length, referenceHz: medianF0(f0s) };
+  const grains = segments.map((seg) => findGrain(samples, sampleRate, seg));
+  const voiced = grains.filter(Boolean).map((g) => g.f0).sort((a, b) => a - b);
+  const referenceHz = voiced.length ? voiced[Math.floor(voiced.length / 2)] : null;
+  // 그리기는 여기서 하지 않는다 — 결과 화면이 아직 hidden이라 캔버스 크기가 0이다.
+  // bounds는 정규화 전 경계다(반복으로 채운 조각은 같은 선을 두 번 그리게 된다).
+  return {
+    audioBuffer,
+    segments,
+    grains,
+    transcript,
+    bounds: found,
+    rawCount: found.length,
+    referenceHz,
+  };
+}
+
+function stopBeads() {
+  if (beadRaf) cancelAnimationFrame(beadRaf);
+  beadRaf = 0;
+}
+
+// 구슬을 소리에 맞춰 켠다. 시각은 buildGraph가 준 것을 그대로 쓴다 —
+// 여기서 다시 계산하면 화면과 소리가 어긋난다.
+function followBeads(ctx, noteTimes, melody) {
+  stopBeads();
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    drawBeads(melody, -1);
+    return;
+  }
+  const last = noteTimes[noteTimes.length - 1];
+  const tick = () => {
+    const t = ctx.currentTime;
+    let active = -1;
+    for (let i = 0; i < noteTimes.length; i++) if (t >= noteTimes[i]) active = i;
+    drawBeads(melody, active);
+    if (t > last + 1) {
+      beadRaf = 0;
+      drawBeads(melody, -1);
+      return;
+    }
+    beadRaf = requestAnimationFrame(tick);
+  };
+  beadRaf = requestAnimationFrame(tick);
 }
 
 function stopPlayback() {
+  stopBeads();
   if (playingMaster) {
     playingMaster.disconnect();
     playingMaster = null;
   }
+  if (session?.melody) drawBeads(session.melody, -1);
 }
 
 async function play() {
@@ -115,25 +241,26 @@ async function play() {
   // await 사이에 다시 녹음·연타가 끼어들면 이 재생은 이미 무효다
   if (token !== playToken || session !== current) return;
 
-  const { master } = buildGraph(
+  const { master, noteTimes } = buildGraph(
     audioCtx,
     {
       audioBuffer: current.audioBuffer,
       segments: current.segments,
-      f0s: current.f0s,
+      grains: current.grains,
       melody: current.melody,
       chords: current.chords,
     },
     startTime,
   );
   playingMaster = master;
+  followBeads(audioCtx, noteTimes, current.melody);
 }
 
 async function save() {
   const rendered = await renderOffline({
     audioBuffer: session.audioBuffer,
     segments: session.segments,
-    f0s: session.f0s,
+    grains: session.grains,
     melody: session.melody,
     chords: session.chords,
   });
@@ -149,10 +276,22 @@ async function save() {
 function showResult() {
   el('lyrics').textContent = session.transcript;
   el('lyrics').hidden = !session.transcript;
-  const notes = [`${session.melody.verseCount}절 노래가 됐어요.`];
-  if (session.rawCount < MIN_NOTES) notes.push('소리가 적어서 몇 번 반복했어요.');
-  el('result-note').textContent = notes.join(' ');
+
+  // 칩은 사실만 담는다 — 절 수와 음절 수는 아이가 화면에서 확인할 수 있는 정보다
+  const facts = [`${session.melody.verseCount}절`, `${session.segments.length}음절`];
+  if (session.rawCount < MIN_NOTES) facts.push('짧아서 반복했어요');
+  el('chips').replaceChildren(
+    ...facts.map((text) => {
+      const li = document.createElement('li');
+      li.textContent = text;
+      return li;
+    }),
+  );
+
+  // 캔버스는 CSS 폭을 재서 그리므로 화면을 먼저 띄운 뒤에 그린다
   show('result');
+  drawBeads(session.melody, -1);
+  drawWaveform(session.audioBuffer.getChannelData(0), session.bounds);
 }
 
 async function startSession() {
@@ -207,9 +346,9 @@ async function finishSession() {
   play().catch(() => setNotice('노래를 틀지 못했어요. 다시 듣기를 눌러 주세요.'));
 }
 
-function loadDevSample() {
+function loadDevSample(glideCents) {
   const ctx = new AudioContext();
-  const samples = makeDevSample(ctx.sampleRate);
+  const samples = makeDevSample(ctx.sampleRate, { glideCents });
   const audioBuffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
   audioBuffer.copyToChannel(samples, 0);
   ctx.close();
@@ -248,13 +387,26 @@ el('again').addEventListener('click', () => {
   stopPlayback();
   session = null;
   setNotice('');
+  drawBeads(null);
   show('idle');
+});
+
+// 회전·창 크기 변경 시 구슬과 파형을 다시 그린다 — 캔버스는 CSS 폭에 맞춰 그려진다
+window.addEventListener('resize', () => {
+  drawBeads(session?.melody ?? null, -1);
+  if (session && !screens.result.hidden) {
+    drawWaveform(session.audioBuffer.getChannelData(0), session.bounds);
+  }
 });
 
 el('limit-hint').textContent = `${MAX_RECORD_MS / 1000}초까지 녹음돼요.`;
 
-if (new URLSearchParams(location.search).get('dev') === 'sample') {
-  loadDevSample();
+const devMode = new URLSearchParams(location.search).get('dev');
+if (devMode === 'sample') {
+  loadDevSample(0);
+} else if (devMode === 'glide') {
+  loadDevSample(400); // 음절 안에서 4반음 활강 — 실제 말소리에 가깝다
 } else {
+  drawBeads(null);
   show('idle');
 }
