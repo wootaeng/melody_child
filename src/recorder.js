@@ -110,9 +110,13 @@ export async function startRecording({
         }
       }
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-      const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
-      await ctx.close();
-      return { audioBuffer, transcript: transcriber ? transcriber.text() : '' };
+      try {
+        const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+        return { audioBuffer, transcript: transcriber ? transcriber.text() : '' };
+      } finally {
+        // 디코딩이 실패해도 분석용 컨텍스트는 닫는다 — 실패가 반복되면 쌓인다
+        await ctx.close();
+      }
     },
   };
 }

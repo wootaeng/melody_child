@@ -29,7 +29,8 @@ node --test
 
 ## 브라우저 지원
 
-Chrome·Edge·Safari에서 전 기능. Firefox는 Web Speech API를 지원하지 않아 가사 표시만 빠지고 노래는 정상 동작한다.
+Chrome·Edge에서 전 기능. Firefox는 Web Speech API를 지원하지 않아 가사 표시만 빠지고 노래는 정상 동작한다.
+Safari는 `webkitSpeechRecognition`을 지원하지만 `continuous` 모드에 알려진 문제가 있어 받아쓰기가 불안정할 수 있다 — 노래 생성은 오디오만 쓰므로 영향받지 않는다.
 
 ## 배포
 

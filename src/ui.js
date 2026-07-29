@@ -93,14 +93,22 @@ function stopPlayback() {
 
 async function play() {
   stopPlayback();
-  const melody = composeMelody(session.segments.length, seed);
+  // await 사이에 "새 멜로디"·"다시 녹음"이 끼어들 수 있다. 세션을 지금 붙잡고,
+  // 재개된 뒤에는 이 컨텍스트가 아직 최신인지 확인한다 — 그러지 않으면 이미
+  // 닫힌 컨텍스트에 그래프를 붙이거나 비워진 세션을 읽는다.
+  const current = session;
+  if (!current) return;
+
+  const melody = composeMelody(current.segments.length, seed);
   const ctx = new AudioContext();
   playing = ctx;
   await ctx.resume();
+  if (playing !== ctx) return;
+
   buildGraph(ctx, {
-    audioBuffer: session.audioBuffer,
-    segments: session.segments,
-    f0s: session.f0s,
+    audioBuffer: current.audioBuffer,
+    segments: current.segments,
+    f0s: current.f0s,
     melody,
     chords: chordsFor(melody),
   });
@@ -180,7 +188,7 @@ async function finishSession() {
   session = analyzed;
   seed = 1;
   showResult();
-  play();
+  play().catch(() => setNotice('노래를 틀지 못했어요. 다시 듣기를 눌러 주세요.'));
 }
 
 function loadDevSample() {
@@ -195,14 +203,29 @@ function loadDevSample() {
   showResult();
 }
 
+// 녹음 경로처럼 재생·저장 경로도 실패를 화면에 알린다. 감싸지 않으면 미처리
+// 프로미스 거부로 콘솔에만 남고, 사용자에겐 아무 설명 없이 소리만 안 난다.
+function guarded(action, message) {
+  return async () => {
+    try {
+      await action();
+    } catch {
+      setNotice(message);
+    }
+  };
+}
+
 el('start').addEventListener('click', startSession);
 el('stop').addEventListener('click', finishSession);
-el('replay').addEventListener('click', play);
-el('remix').addEventListener('click', () => {
-  seed += 1;
-  play();
-});
-el('download').addEventListener('click', save);
+el('replay').addEventListener('click', guarded(play, '노래를 다시 틀지 못했어요.'));
+el('remix').addEventListener(
+  'click',
+  guarded(() => {
+    seed += 1;
+    return play();
+  }, '새 멜로디를 만들지 못했어요.'),
+);
+el('download').addEventListener('click', guarded(save, 'WAV 파일을 만들지 못했어요.'));
 el('again').addEventListener('click', () => {
   stopPlayback();
   session = null;
