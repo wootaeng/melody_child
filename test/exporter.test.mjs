@@ -64,3 +64,7 @@ test('±1을 넘는 값은 클리핑한다', async () => {
 test('빈 채널 배열은 예외', () => {
   assert.throws(() => encodeWav([], SR), RangeError);
 });
+
+test('채널 길이가 다르면 예외 (조용히 0으로 채우지 않는다)', () => {
+  assert.throws(() => encodeWav([new Float32Array(10), new Float32Array(5)], SR), RangeError);
+});

@@ -6,6 +6,12 @@ export function encodeWav(channels, sampleRate) {
   }
   const numCh = channels.length;
   const frames = channels[0].length;
+  // 길이가 다르면 짧은 채널에서 undefined를 읽어 조용히 0으로 기록된다.
+  for (let c = 1; c < numCh; c++) {
+    if (channels[c].length !== frames) {
+      throw new RangeError(`채널 길이가 다르다: ${frames} vs ${channels[c].length}`);
+    }
+  }
   const dataSize = frames * numCh * 2;
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
