@@ -1,0 +1,64 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>오늘 이야기로 동요 만들기</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0 auto;
+    padding: 2rem 1.25rem;
+    max-width: 34rem;
+    color: #1e2430;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  p.sub { color: #5a6472; margin-top: 0; }
+  button {
+    font: inherit;
+    padding: 0.7rem 1.1rem;
+    border: 0;
+    border-radius: 0.6rem;
+    background: #3b6fd4;
+    color: #fff;
+    cursor: pointer;
+  }
+  button.ghost { background: #eef1f6; color: #1e2430; }
+  #start, #stop { font-size: 1.2rem; padding: 1.1rem 2rem; border-radius: 999px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+  #meter { height: 0.75rem; background: #eef1f6; border-radius: 999px; overflow: hidden; margin: 1.5rem 0; }
+  #level { height: 100%; width: 0%; background: #3b6fd4; transition: width 0.06s linear; }
+  #waveform { width: 100%; height: 120px; border-radius: 0.6rem; }
+  #lyrics { font-size: 1.15rem; margin: 0.75rem 0 0; }
+  #notice, #result-note, #stt-warning { color: #a3560f; min-height: 1.4em; }
+  #live-transcript { font-size: 1.15rem; min-height: 1.6em; color: #3b6fd4; }
+</style>
+
+<h1>오늘 이야기로 동요 만들기</h1>
+<p class="sub">오늘 있었던 일을 말하면 그 목소리가 그대로 노래가 돼요.</p>
+<p id="notice"></p>
+
+<section id="screen-idle" hidden>
+  <button id="start">녹음 시작</button>
+  <p class="sub" id="limit-hint"></p>
+  <p class="sub">또박또박 끊어서 말하면 더 잘 만들어져요. 이야기가 길면 절이 늘어나요.</p>
+</section>
+
+<section id="screen-recording" hidden>
+  <div id="meter"><div id="level"></div></div>
+  <p id="live-transcript"></p>
+  <p id="stt-warning" hidden>이 브라우저는 받아쓰기를 지원하지 않아요. 노래는 그대로 만들어져요.</p>
+  <button id="stop">그만</button>
+</section>
+
+<section id="screen-result" hidden>
+  <canvas id="waveform" width="640" height="120"></canvas>
+  <p id="lyrics" hidden></p>
+  <p id="result-note"></p>
+  <div class="buttons">
+    <button id="replay">다시 듣기</button>
+    <button id="remix" class="ghost">새 멜로디</button>
+    <button id="download" class="ghost">WAV 저장</button>
+    <button id="again" class="ghost">다시 녹음</button>
+  </div>
+</section>
+
+<script type="module" src="./src/ui.js"></script>
