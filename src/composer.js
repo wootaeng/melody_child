@@ -40,8 +40,10 @@ export function composeMelody(noteCount, seed) {
       beats: rnd() < 0.25 ? 0.5 : 1,
     }));
 
-  // 한 절 = 프레이즈 A + 프레이즈 B
-  const verse = [...makePhrase(), ...makePhrase()];
+  // 한 절 = 프레이즈 여러 개. VERSE_LEN에서 개수를 끌어내므로 절 길이를 바꿀 때
+  // 고칠 곳이 한 군데다 — 상수와 생성 로직이 각자 8을 가정하면 VERSE_LEN만
+  // 바꿨을 때 조용히 undefined 노트가 섞인다.
+  const verse = Array.from({ length: VERSE_LEN / PHRASE_LEN }, makePhrase).flat();
 
   // 절을 반복해 음절 수를 채운다. 8의 배수가 아니면 마지막 절은 중간에서 끝난다 —
   // 가짜 음절을 채워 넣지 않는다.
@@ -62,18 +64,24 @@ export function composeMelody(noteCount, seed) {
   };
 }
 
-const PROGRESSION = [0, 7, 9, 5]; // I - V - vi - IV
+// I - V - vi - IV. 장·단을 degree 값으로 유추하지 않고 함께 선언한다 —
+// 진행에 다른 단화음을 넣을 때 고칠 곳이 한 군데여야 한다.
+const PROGRESSION = [
+  { degree: 0, minor: false },
+  { degree: 7, minor: false },
+  { degree: 9, minor: true },
+  { degree: 5, minor: false },
+];
 const BAR_BEATS = 4;
 
 export function chordsFor(melody) {
   const totalBeats = melody.notes.reduce((s, n) => s + n.beats, 0);
   const chords = [];
   for (let startBeat = 0, i = 0; startBeat < totalBeats; startBeat += BAR_BEATS, i++) {
-    const degree = PROGRESSION[i % PROGRESSION.length];
-    const isMinor = degree === 9; // vi
+    const { degree, minor } = PROGRESSION[i % PROGRESSION.length];
     chords.push({
       rootMidi: melody.tonicMidi - 12 + degree,
-      semitones: isMinor ? [0, 3, 7] : [0, 4, 7],
+      semitones: minor ? [0, 3, 7] : [0, 4, 7],
       startBeat,
       beats: Math.min(BAR_BEATS, totalBeats - startBeat),
     });
