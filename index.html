@@ -1,67 +1,186 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#e8f2ee" />
 <title>오늘 이야기로 동요 만들기</title>
 <style>
-  :root { color-scheme: light; }
-  body {
-    font-family: system-ui, -apple-system, sans-serif;
-    margin: 0 auto;
-    padding: 2rem 1.25rem;
-    max-width: 34rem;
-    color: #1e2430;
+  :root {
+    color-scheme: light;
+
+    /* 민트 종이 위의 청록 잉크. 코랄은 목소리에만 쓴다 —
+       페이지에서 가장 뜨거운 색이 곧 아이 목소리다. */
+    --ground: #e8f2ee;
+    --card: #fdfefd;
+    --ink: #16323c;
+    --ink-soft: #5c7a80;
+    --voice: #f0654a;
+    --voice-rest: #f6c5b6;
+    --beat: #f5c64c;
+    --rule: #b9d4ca;
+
+    /* ui-rounded는 iOS·macOS에서 SF Rounded로 잡힌다. 아이용 화면에
+       맞는 둥근 끝을 외부 폰트 없이 얻는 유일한 경로다. */
+    --face: ui-rounded, 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
   }
-  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
-  p.sub { color: #5a6472; margin-top: 0; }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 2rem 1.25rem 3rem;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--face);
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  main { max-width: 30rem; margin: 0 auto; }
+
+  .eyebrow {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: var(--ink-soft);
+  }
+
+  h1 {
+    margin: 0.35rem 0 0;
+    font-size: clamp(2rem, 11vw, 2.9rem);
+    font-weight: 800;
+    letter-spacing: -0.035em;
+    line-height: 1.08;
+  }
+
+  h1 em { font-style: normal; color: var(--voice); }
+
+  /* 시그니처: 음절 구슬. 음 하나가 구슬 하나, 높이가 음높이, 크기가 음 길이. */
+  #beads {
+    display: block;
+    width: 100%;
+    height: 148px;
+    margin: 1.75rem 0 1.5rem;
+  }
+
+  .stage { min-height: 11.5rem; }
+
   button {
     font: inherit;
-    padding: 0.7rem 1.1rem;
+    font-weight: 700;
     border: 0;
-    border-radius: 0.6rem;
-    background: #3b6fd4;
-    color: #fff;
+    border-radius: 999px;
+    background: var(--ink);
+    color: var(--card);
+    padding: 0.7rem 1.15rem;
     cursor: pointer;
   }
-  button.ghost { background: #eef1f6; color: #1e2430; }
-  #start, #stop { font-size: 1.2rem; padding: 1.1rem 2rem; border-radius: 999px; }
-  .buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
-  /* 녹음 중 표시. 진폭을 그리려면 analyser + rAF 루프가 필요한데, "듣고 있다"는
-     신호에는 과하다. CSS 애니메이션이면 JS가 0줄이다. */
-  #meter { height: 0.75rem; border-radius: 999px; margin: 1.5rem 0; animation: listening 1.1s ease-in-out infinite; }
-  @keyframes listening { 0%, 100% { background: #eef1f6; } 50% { background: #3b6fd4; } }
-  @media (prefers-reduced-motion: reduce) { #meter { animation: none; background: #3b6fd4; } }
-  #waveform { width: 100%; height: 120px; border-radius: 0.6rem; }
-  #lyrics { font-size: 1.15rem; margin: 0.75rem 0 0; }
-  #notice, #result-note, #stt-warning { color: #a3560f; min-height: 1.4em; }
-  #live-transcript { font-size: 1.15rem; min-height: 1.6em; color: #3b6fd4; }
+
+  button:focus-visible { outline: 3px solid var(--voice); outline-offset: 3px; }
+
+  #start, #stop {
+    width: 100%;
+    font-size: 1.15rem;
+    padding: 1.15rem 1.5rem;
+    background: var(--voice);
+  }
+
+  .ghost { background: var(--card); color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--rule); }
+
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 1.25rem; }
+  .actions #replay { grid-column: 1 / -1; background: var(--voice); }
+
+  .hint { margin: 0.9rem 0 0; color: var(--ink-soft); font-size: 0.95rem; }
+
+  /* 녹음 중 신호. 진폭을 그리려면 analyser + rAF 루프가 필요한데
+     "듣고 있다"는 신호에는 과하다. CSS 애니메이션이면 JS가 0줄이다. */
+  #meter {
+    height: 0.6rem;
+    border-radius: 999px;
+    background: var(--rule);
+    animation: listening 1.1s ease-in-out infinite;
+  }
+  @keyframes listening {
+    0%, 100% { background: var(--rule); }
+    50% { background: var(--voice); }
+  }
+
+  #live-transcript {
+    margin: 1rem 0 0;
+    min-height: 3.2em;
+    font-size: 1.2rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  /* 사실만 담는 칩 — 절 수와 음절 수는 아이가 확인할 수 있는 정보다. */
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.75rem; padding: 0; list-style: none; }
+  .chips li {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.3rem 0.6rem;
+    border-radius: 999px;
+    background: var(--card);
+    box-shadow: inset 0 0 0 1.5px var(--rule);
+  }
+
+  #lyrics { margin: 0 0 1rem; font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; }
+
+  .voice-strip { margin: 0.5rem 0 0; }
+  .voice-strip figcaption {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    color: var(--ink-soft);
+    margin-bottom: 0.4rem;
+  }
+  #waveform { display: block; width: 100%; height: 56px; border-radius: 0.5rem; }
+
+  #notice, #stt-warning { margin: 0.9rem 0 0; color: #9c4a1c; font-size: 0.95rem; }
+  #notice:empty { display: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #meter { animation: none; background: var(--voice); }
+  }
 </style>
 
-<h1>오늘 이야기로 동요 만들기</h1>
-<p class="sub">오늘 있었던 일을 말하면 그 목소리가 그대로 노래가 돼요.</p>
-<p id="notice"></p>
+<main>
+  <p class="eyebrow">내 목소리로</p>
+  <h1>오늘 이야기가<br /><em>노래가 돼요</em></h1>
 
-<section id="screen-idle" hidden>
-  <button id="start">녹음 시작</button>
-  <p class="sub" id="limit-hint"></p>
-  <p class="sub">또박또박 끊어서 말하면 더 잘 만들어져요. 이야기가 길면 절이 늘어나요.</p>
-</section>
+  <canvas id="beads" width="640" height="296" aria-hidden="true"></canvas>
 
-<section id="screen-recording" hidden>
-  <div id="meter"></div>
-  <p id="live-transcript"></p>
-  <p id="stt-warning" hidden>이 브라우저는 받아쓰기를 지원하지 않아요. 노래는 그대로 만들어져요.</p>
-  <button id="stop">그만</button>
-</section>
+  <div class="stage">
+    <section id="screen-idle" hidden>
+      <button id="start">녹음 시작</button>
+      <p class="hint" id="limit-hint"></p>
+      <p class="hint">또박또박 끊어서 말하면 음절이 잘 나뉘어요. 이야기가 길면 절이 늘어나요.</p>
+    </section>
 
-<section id="screen-result" hidden>
-  <canvas id="waveform" width="640" height="120"></canvas>
-  <p id="lyrics" hidden></p>
-  <p id="result-note"></p>
-  <div class="buttons">
-    <button id="replay">다시 듣기</button>
-    <button id="remix" class="ghost">새 멜로디</button>
-    <button id="download" class="ghost">WAV 저장</button>
-    <button id="again" class="ghost">다시 녹음</button>
+    <section id="screen-recording" hidden>
+      <div id="meter"></div>
+      <p id="live-transcript"></p>
+      <button id="stop">다 말했어요</button>
+      <p id="stt-warning" hidden>이 브라우저는 받아쓰기를 지원하지 않아요. 노래는 그대로 만들어져요.</p>
+    </section>
+
+    <section id="screen-result" hidden>
+      <ul class="chips" id="chips"></ul>
+      <p id="lyrics" hidden></p>
+      <figure class="voice-strip">
+        <figcaption>내 목소리</figcaption>
+        <canvas id="waveform" width="640" height="112"></canvas>
+      </figure>
+      <div class="actions">
+        <button id="replay">다시 듣기</button>
+        <button id="remix" class="ghost">새 멜로디</button>
+        <button id="download" class="ghost">노래 저장</button>
+        <button id="again" class="ghost">다시 녹음</button>
+      </div>
+    </section>
   </div>
-</section>
+
+  <p id="notice"></p>
+</main>
 
 <script type="module" src="./src/ui.js"></script>
