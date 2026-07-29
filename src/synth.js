@@ -1,6 +1,9 @@
 import { midiToHz } from './composer.js';
 
 const ACCOMP_GAIN = 0.5; // 목소리보다 약 6dB 낮게 — 가사가 묻히지 않게
+// 마지막 음이 끝난 뒤 남기는 여유. 재생 길이 보고와 오프라인 렌더 버퍼 할당이
+// 같은 값을 써야 한다 — 따로 두면 한쪽만 고쳤을 때 꼬리가 잘린다.
+const TAIL_SEC = 0.5;
 
 // 조각 하나를 목표 음정·목표 길이로 스케줄링한다.
 // 재생 속도를 바꾸면 길이도 함께 바뀌므로(Web Audio는 playbackRate와 detune을
@@ -122,14 +125,14 @@ export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }) 
 
   scheduleAccompaniment(ctx, accompBus, melody, chords, secPerBeat);
 
-  return { durationSec: when + 0.3 };
+  return { durationSec: when + TAIL_SEC };
 }
 
 export async function renderOffline(spec) {
   const secPerBeat = 60 / spec.melody.bpm;
   const totalBeats = spec.melody.notes.reduce((s, n) => s + n.beats, 0);
   const sampleRate = spec.audioBuffer.sampleRate;
-  const length = Math.ceil((totalBeats * secPerBeat + 0.5) * sampleRate);
+  const length = Math.ceil((totalBeats * secPerBeat + TAIL_SEC) * sampleRate);
   const ctx = new OfflineAudioContext(2, length, sampleRate);
   buildGraph(ctx, spec);
   return ctx.startRendering();

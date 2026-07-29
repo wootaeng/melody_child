@@ -44,8 +44,14 @@
     return { audioBuffer, segments, f0s, melody, chords };
   }
 
+  // 브라우저는 동시에 살아 있는 AudioContext 수를 제한한다. 이 페이지는 반복
+  // 클릭이 용도이므로 새로 만들기 전에 이전 것을 닫는다.
+  let playing = null;
+
   document.getElementById('play').addEventListener('click', async () => {
+    if (playing) await playing.close();
     const ctx = new AudioContext();
+    playing = ctx;
     await ctx.resume();
     const spec = buildSpec(ctx, 1);
     const { durationSec } = buildGraph(ctx, spec);
