@@ -24,8 +24,11 @@
   button.ghost { background: #eef1f6; color: #1e2430; }
   #start, #stop { font-size: 1.2rem; padding: 1.1rem 2rem; border-radius: 999px; }
   .buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
-  #meter { height: 0.75rem; background: #eef1f6; border-radius: 999px; overflow: hidden; margin: 1.5rem 0; }
-  #level { height: 100%; width: 0%; background: #3b6fd4; transition: width 0.06s linear; }
+  /* 녹음 중 표시. 진폭을 그리려면 analyser + rAF 루프가 필요한데, "듣고 있다"는
+     신호에는 과하다. CSS 애니메이션이면 JS가 0줄이다. */
+  #meter { height: 0.75rem; border-radius: 999px; margin: 1.5rem 0; animation: listening 1.1s ease-in-out infinite; }
+  @keyframes listening { 0%, 100% { background: #eef1f6; } 50% { background: #3b6fd4; } }
+  @media (prefers-reduced-motion: reduce) { #meter { animation: none; background: #3b6fd4; } }
   #waveform { width: 100%; height: 120px; border-radius: 0.6rem; }
   #lyrics { font-size: 1.15rem; margin: 0.75rem 0 0; }
   #notice, #result-note, #stt-warning { color: #a3560f; min-height: 1.4em; }
@@ -43,7 +46,7 @@
 </section>
 
 <section id="screen-recording" hidden>
-  <div id="meter"><div id="level"></div></div>
+  <div id="meter"></div>
   <p id="live-transcript"></p>
   <p id="stt-warning" hidden>이 브라우저는 받아쓰기를 지원하지 않아요. 노래는 그대로 만들어져요.</p>
   <button id="stop">그만</button>

@@ -1263,7 +1263,7 @@ STT는 **음악 생성에 불필요**하다 — 화면에 가사를 띄우는 �
 - Produces:
   - `isSpeechRecognitionSupported() -> boolean`
   - `startRecording({maxMs?, onLevel?, onTranscript?, onAutoStop?}) -> Promise<{stop(): Promise<{audioBuffer: AudioBuffer, transcript: string}>}>`
-  - `MAX_RECORD_MS: number` (= 10000)
+  - `MAX_RECORD_MS: number` (= 30000)
 
 - [ ] **Step 1: 구현**
 
@@ -1382,9 +1382,13 @@ export async function startRecording({
         }
       }
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-      const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
-      await ctx.close();
-      return { audioBuffer, transcript: transcriber ? transcriber.text() : '' };
+      try {
+        const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+        return { audioBuffer, transcript: transcriber ? transcriber.text() : '' };
+      } finally {
+        // 디코딩이 실패해도 분석용 컨텍스트는 닫는다 — 실패가 반복되면 쌓인다
+        await ctx.close();
+      }
     },
   };
 }
@@ -1510,14 +1514,22 @@ function stopPlayback() {
 
 async function play() {
   stopPlayback();
-  const melody = composeMelody(session.segments.length, seed);
+  // await 사이에 "새 멜로디"·"다시 녹음"이 끼어들 수 있다. 세션을 지금 붙잡고,
+  // 재개된 뒤에는 이 컨텍스트가 아직 최신인지 확인한다 — 그러지 않으면 이미
+  // 닫힌 컨텍스트에 그래프를 붙이거나 비워진 세션을 읽는다.
+  const current = session;
+  if (!current) return;
+
+  const melody = composeMelody(current.segments.length, seed);
   const ctx = new AudioContext();
   playing = ctx;
   await ctx.resume();
+  if (playing !== ctx) return;
+
   buildGraph(ctx, {
-    audioBuffer: session.audioBuffer,
-    segments: session.segments,
-    f0s: session.f0s,
+    audioBuffer: current.audioBuffer,
+    segments: current.segments,
+    f0s: current.f0s,
     melody,
     chords: chordsFor(melody),
   });
@@ -1597,7 +1609,7 @@ async function finishSession() {
   session = analyzed;
   seed = 1;
   showResult();
-  play();
+  play().catch(() => setNotice('노래를 틀지 못했어요. 다시 듣기를 눌러 주세요.'));
 }
 
 function loadDevSample() {
@@ -1612,14 +1624,29 @@ function loadDevSample() {
   showResult();
 }
 
+// 녹음 경로처럼 재생·저장 경로도 실패를 화면에 알린다. 감싸지 않으면 미처리
+// 프로미스 거부로 콘솔에만 남고, 사용자에겐 아무 설명 없이 소리만 안 난다.
+function guarded(action, message) {
+  return async () => {
+    try {
+      await action();
+    } catch {
+      setNotice(message);
+    }
+  };
+}
+
 el('start').addEventListener('click', startSession);
 el('stop').addEventListener('click', finishSession);
-el('replay').addEventListener('click', play);
-el('remix').addEventListener('click', () => {
-  seed += 1;
-  play();
-});
-el('download').addEventListener('click', save);
+el('replay').addEventListener('click', guarded(play, '노래를 다시 틀지 못했어요.'));
+el('remix').addEventListener(
+  'click',
+  guarded(() => {
+    seed += 1;
+    return play();
+  }, '새 멜로디를 만들지 못했어요.'),
+);
+el('download').addEventListener('click', guarded(save, 'WAV 파일을 만들지 못했어요.'));
 el('again').addEventListener('click', () => {
   stopPlayback();
   session = null;
@@ -1757,7 +1784,8 @@ node --test
 
 ## 브라우저 지원
 
-Chrome·Edge·Safari에서 전 기능. Firefox는 Web Speech API를 지원하지 않아 가사 표시만 빠지고 노래는 정상 동작한다.
+Chrome·Edge에서 전 기능. Firefox는 Web Speech API를 지원하지 않아 가사 표시만 빠지고 노래는 정상 동작한다.
+Safari는 `webkitSpeechRecognition`을 지원하지만 `continuous` 모드에 알려진 문제가 있어 받아쓰기가 불안정할 수 있다 — 노래 생성은 오디오만 쓰므로 영향받지 않는다.
 
 ## 배포
 

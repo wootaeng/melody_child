@@ -16,7 +16,6 @@ python3 -m http.server 8000
 
 - 앱: http://localhost:8000/
 - 마이크 없이 파이프라인 확인: http://localhost:8000/index.html?dev=sample
-- 모듈별 로그가 필요할 때: http://localhost:8000/dev.html
 
 ## 테스트
 

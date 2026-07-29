@@ -64,7 +64,6 @@ function startTranscription(onTranscript, onUnavailable) {
 
 export async function startRecording({
   maxMs = MAX_RECORD_MS,
-  onLevel = () => {},
   onTranscript = () => {},
   onAutoStop = () => {},
   onTranscriptUnavailable = () => {},
@@ -73,11 +72,9 @@ export async function startRecording({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
 
+  // 컨텍스트는 decodeAudioData 때문에만 필요하다. 녹음 중 레벨 표시는 CSS
+  // 애니메이션이 하므로 analyser도 rAF 루프도 없다.
   const ctx = new AudioContext();
-  const source = ctx.createMediaStreamSource(stream);
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 1024;
-  source.connect(analyser);
 
   const recorder = new MediaRecorder(stream);
   const chunks = [];
@@ -88,15 +85,6 @@ export async function startRecording({
     recorder.onstop = resolve;
   });
   recorder.start();
-
-  const frame = new Float32Array(analyser.fftSize);
-  let rafId = requestAnimationFrame(function tick() {
-    analyser.getFloatTimeDomainData(frame);
-    let sum = 0;
-    for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
-    onLevel(Math.sqrt(sum / frame.length));
-    rafId = requestAnimationFrame(tick);
-  });
 
   const transcriber = startTranscription(onTranscript, onTranscriptUnavailable);
 
@@ -110,7 +98,6 @@ export async function startRecording({
   return {
     async stop() {
       clearTimeout(timer);
-      cancelAnimationFrame(rafId);
       if (recorder.state === 'recording') recorder.stop();
       await stopped;
       stream.getTracks().forEach((track) => track.stop());

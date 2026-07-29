@@ -160,9 +160,6 @@ async function startSession() {
   el('start').disabled = true;
   try {
     handle = await startRecording({
-      onLevel: (level) => {
-        el('level').style.width = `${Math.min(100, level * 400)}%`;
-      },
       onTranscript: (text) => {
         el('live-transcript').textContent = text;
       },
@@ -181,7 +178,6 @@ async function startSession() {
     el('start').disabled = false;
   }
   el('live-transcript').textContent = '';
-  el('level').style.width = '0%';
   el('stt-warning').hidden = isSpeechRecognitionSupported();
   show('recording');
 }
