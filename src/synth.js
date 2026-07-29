@@ -52,9 +52,9 @@ function makeNoiseBuffer(ctx) {
   return buffer;
 }
 
-function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat) {
+function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat, startTime) {
   for (const chord of chords) {
-    const when = chord.startBeat * secPerBeat;
+    const when = startTime + chord.startBeat * secPerBeat;
     const dur = chord.beats * secPerBeat;
     for (const semitone of chord.semitones) {
       const osc = ctx.createOscillator();
@@ -75,7 +75,7 @@ function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat) {
   const totalBeats = melody.notes.reduce((s, n) => s + n.beats, 0);
   const noise = makeNoiseBuffer(ctx);
   for (let beat = 0; beat < totalBeats; beat += 0.5) {
-    const when = beat * secPerBeat;
+    const when = startTime + beat * secPerBeat;
     const src = ctx.createBufferSource();
     src.buffer = noise;
     const hp = ctx.createBiquadFilter();
@@ -92,7 +92,7 @@ function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat) {
   }
 }
 
-export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }) {
+export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }, startTime = 0) {
   if (segments.length !== melody.notes.length) {
     throw new RangeError(
       `segments(${segments.length})와 notes(${melody.notes.length}) 개수가 다르다 — 호출 전에 정규화할 것`,
@@ -113,7 +113,7 @@ export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }) 
   accompBus.gain.value = ACCOMP_GAIN;
   accompBus.connect(master);
 
-  let when = 0;
+  let when = startTime;
   melody.notes.forEach((note, i) => {
     const f0 = f0s[i];
     // f0가 null인 조각(무성 자음)은 음정 이동을 포기하고 원음 그대로 — 리듬만 맞춘다
@@ -123,9 +123,22 @@ export function buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }) 
     when += noteSec;
   });
 
-  scheduleAccompaniment(ctx, accompBus, melody, chords, secPerBeat);
+  scheduleAccompaniment(ctx, accompBus, melody, chords, secPerBeat, startTime);
 
-  return { durationSec: when + TAIL_SEC };
+  return { durationSec: when - startTime + TAIL_SEC, master };
+}
+
+// resume 직후 currentTime이 0에 머물다가 오디오 스레드가 돌기 시작할 때 크게 앞으로
+// 점프한다(실측 약 1초). 점프 전에 스케줄하면 곡 앞부분이 과거에 걸려 첫 음이 뭉친다.
+export async function safeStartTime(ctx, lead = 0.1) {
+  await ctx.resume();
+  if (ctx.currentTime === 0) {
+    await new Promise((resolve) => {
+      const tick = () => (ctx.currentTime > 0 ? resolve() : requestAnimationFrame(tick));
+      tick();
+    });
+  }
+  return ctx.currentTime + lead;
 }
 
 export async function renderOffline(spec) {

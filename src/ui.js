@@ -1,20 +1,22 @@
 import { sliceSyllables } from './slicer.js';
 import { detectF0 } from './pitch.js';
-import { composeMelody, chordsFor } from './composer.js';
-import { buildGraph, renderOffline } from './synth.js';
+import { composeMelody, chordsFor, VERSE_LEN } from './composer.js';
+import { buildGraph, renderOffline, safeStartTime } from './synth.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
 import { makeDevSample } from './devsample.js';
 
-const MIN_NOTES = 8; // 한 절
+const MIN_NOTES = VERSE_LEN; // 최소 한 절
 
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
 
-let session = null; // { audioBuffer, segments, f0s, transcript, rawCount }
+let session = null; // { audioBuffer, segments, f0s, transcript, rawCount, referenceHz, melody, chords }
 let seed = 1;
 let handle = null;
-let playing = null; // AudioContext
+let audioCtx = null;
+let playingMaster = null;
+let playToken = 0;
 
 function show(name) {
   for (const [key, node] of Object.entries(screens)) {
@@ -72,6 +74,17 @@ function drawWaveform(samples, segments) {
   }
 }
 
+function medianF0(f0s) {
+  const voiced = f0s.filter((f) => f !== null).sort((a, b) => a - b);
+  return voiced.length ? voiced[Math.floor(voiced.length / 2)] : null;
+}
+
+// 멜로디는 한 곳에서만 만든다. 재생·저장·안내 문구가 같은 곡을 봐야 한다.
+function refreshMelody() {
+  session.melody = composeMelody(session.segments.length, seed, session.referenceHz);
+  session.chords = chordsFor(session.melody);
+}
+
 function analyze(audioBuffer, transcript) {
   const samples = audioBuffer.getChannelData(0);
   const sampleRate = audioBuffer.sampleRate;
@@ -81,47 +94,48 @@ function analyze(audioBuffer, transcript) {
   const segments = normalizeSegments(found);
   const f0s = segments.map((seg) => detectF0(samples.subarray(seg.start, seg.end), sampleRate));
   drawWaveform(samples, found);
-  return { audioBuffer, segments, f0s, transcript, rawCount: found.length };
+  return { audioBuffer, segments, f0s, transcript, rawCount: found.length, referenceHz: medianF0(f0s) };
 }
 
 function stopPlayback() {
-  if (playing) {
-    playing.close();
-    playing = null;
+  if (playingMaster) {
+    playingMaster.disconnect();
+    playingMaster = null;
   }
 }
 
 async function play() {
+  const token = ++playToken;
   stopPlayback();
-  // await 사이에 "새 멜로디"·"다시 녹음"이 끼어들 수 있다. 세션을 지금 붙잡고,
-  // 재개된 뒤에는 이 컨텍스트가 아직 최신인지 확인한다 — 그러지 않으면 이미
-  // 닫힌 컨텍스트에 그래프를 붙이거나 비워진 세션을 읽는다.
   const current = session;
   if (!current) return;
 
-  const melody = composeMelody(current.segments.length, seed);
-  const ctx = new AudioContext();
-  playing = ctx;
-  await ctx.resume();
-  if (playing !== ctx) return;
+  if (!audioCtx) audioCtx = new AudioContext();
+  const startTime = await safeStartTime(audioCtx);
+  // await 사이에 다시 녹음·연타가 끼어들면 이 재생은 이미 무효다
+  if (token !== playToken || session !== current) return;
 
-  buildGraph(ctx, {
-    audioBuffer: current.audioBuffer,
-    segments: current.segments,
-    f0s: current.f0s,
-    melody,
-    chords: chordsFor(melody),
-  });
+  const { master } = buildGraph(
+    audioCtx,
+    {
+      audioBuffer: current.audioBuffer,
+      segments: current.segments,
+      f0s: current.f0s,
+      melody: current.melody,
+      chords: current.chords,
+    },
+    startTime,
+  );
+  playingMaster = master;
 }
 
 async function save() {
-  const melody = composeMelody(session.segments.length, seed);
   const rendered = await renderOffline({
     audioBuffer: session.audioBuffer,
     segments: session.segments,
     f0s: session.f0s,
-    melody,
-    chords: chordsFor(melody),
+    melody: session.melody,
+    chords: session.chords,
   });
   const channels = Array.from({ length: rendered.numberOfChannels }, (_, c) => rendered.getChannelData(c));
   const url = URL.createObjectURL(encodeWav(channels, rendered.sampleRate));
@@ -135,8 +149,7 @@ async function save() {
 function showResult() {
   el('lyrics').textContent = session.transcript;
   el('lyrics').hidden = !session.transcript;
-  const melody = composeMelody(session.segments.length, seed);
-  const notes = [`${melody.verseCount}절 노래가 됐어요.`];
+  const notes = [`${session.melody.verseCount}절 노래가 됐어요.`];
   if (session.rawCount < MIN_NOTES) notes.push('소리가 적어서 몇 번 반복했어요.');
   el('result-note').textContent = notes.join(' ');
   show('result');
@@ -144,6 +157,7 @@ function showResult() {
 
 async function startSession() {
   setNotice('');
+  el('start').disabled = true;
   try {
     handle = await startRecording({
       onLevel: (level) => {
@@ -155,11 +169,16 @@ async function startSession() {
       onAutoStop: () => {
         finishSession();
       },
+      onTranscriptUnavailable: () => {
+        el('stt-warning').hidden = false;
+      },
     });
   } catch {
     setNotice('마이크를 쓸 수 없어요. 브라우저에서 마이크를 허용해 주세요.');
     show('idle');
     return;
+  } finally {
+    el('start').disabled = false;
   }
   el('live-transcript').textContent = '';
   el('level').style.width = '0%';
@@ -187,6 +206,7 @@ async function finishSession() {
   }
   session = analyzed;
   seed = 1;
+  refreshMelody();
   showResult();
   play().catch(() => setNotice('노래를 틀지 못했어요. 다시 듣기를 눌러 주세요.'));
 }
@@ -200,6 +220,7 @@ function loadDevSample() {
   const analyzed = analyze(audioBuffer, '개발용 샘플');
   if (!analyzed) throw new Error('개발 샘플 분석 실패');
   session = analyzed;
+  refreshMelody();
   showResult();
 }
 
@@ -222,6 +243,7 @@ el('remix').addEventListener(
   'click',
   guarded(() => {
     seed += 1;
+    refreshMelody();
     return play();
   }, '새 멜로디를 만들지 못했어요.'),
 );

@@ -4,8 +4,12 @@ export function isSpeechRecognitionSupported() {
   return typeof window !== 'undefined' && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
+// 재시도해도 결과가 같은 오류들. 여기서 포기하지 않으면 30초 내내 스핀이 돈다.
+const FATAL_SPEECH_ERRORS = new Set(['network', 'not-allowed', 'service-not-allowed']);
+const MAX_RESTARTS = 10;
+
 // 받아쓰기는 음악 생성에 필요하지 않다 — 실패해도 녹음을 막지 않는다.
-function startTranscription(onTranscript) {
+function startTranscription(onTranscript, onUnavailable) {
   if (!isSpeechRecognitionSupported()) return null;
   const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
   const recognition = new Ctor();
@@ -29,12 +33,20 @@ function startTranscription(onTranscript) {
     onTranscript(`${state.committed} ${finalText}${interim}`.trim());
   };
 
-  recognition.onerror = () => {}; // network/no-speech는 무시 — 음악은 계속된다
+  let restarts = 0;
+
+  recognition.onerror = (event) => {
+    if (FATAL_SPEECH_ERRORS.has(event.error)) {
+      state.done = true;
+      onUnavailable();
+    }
+  };
 
   recognition.onend = () => {
     state.committed = joined();
     state.current = '';
-    if (state.done) return;
+    if (state.done || restarts >= MAX_RESTARTS) return;
+    restarts += 1;
     try {
       recognition.start(); // 침묵으로 끊긴 것 — 다시 듣는다
     } catch {
@@ -55,6 +67,7 @@ export async function startRecording({
   onLevel = () => {},
   onTranscript = () => {},
   onAutoStop = () => {},
+  onTranscriptUnavailable = () => {},
 } = {}) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -85,7 +98,7 @@ export async function startRecording({
     rafId = requestAnimationFrame(tick);
   });
 
-  const transcriber = startTranscription(onTranscript);
+  const transcriber = startTranscription(onTranscript, onTranscriptUnavailable);
 
   const timer = setTimeout(() => {
     if (recorder.state === 'recording') {

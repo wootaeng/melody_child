@@ -15,7 +15,7 @@
   import { sliceSyllables } from './src/slicer.js';
   import { detectF0 } from './src/pitch.js';
   import { composeMelody, chordsFor } from './src/composer.js';
-  import { buildGraph, renderOffline } from './src/synth.js';
+  import { buildGraph, renderOffline, safeStartTime } from './src/synth.js';
   import { encodeWav } from './src/exporter.js';
 
   const logEl = document.getElementById('log');
@@ -34,27 +34,25 @@
 
     const segments = sliceSyllables(samples, sampleRate);
     const f0s = segments.map((seg) => detectF0(samples.subarray(seg.start, seg.end), sampleRate));
-    const melody = composeMelody(segments.length, seed);
+    const voiced = f0s.filter((f) => f !== null).sort((a, b) => a - b);
+    const referenceHz = voiced.length ? voiced[Math.floor(voiced.length / 2)] : null;
+    const melody = composeMelody(segments.length, seed, referenceHz);
     const chords = chordsFor(melody);
 
     log(`조각 ${segments.length}개 (기대 ${DEV_SAMPLE_F0S.length})`);
     log(`f0: ${f0s.map((f) => (f === null ? 'null' : f.toFixed(1))).join(', ')}`);
     log(`정답: ${DEV_SAMPLE_F0S.join(', ')}`);
-    log(`bpm ${melody.bpm}, 으뜸음 ${melody.tonicMidi}, 음 ${melody.notes.length}개`);
+    log(`bpm ${melody.bpm}, 으뜸음 ${melody.tonicMidi}, 음 ${melody.notes.length}개, 기준 ${referenceHz?.toFixed(1) ?? 'null'}Hz`);
     return { audioBuffer, segments, f0s, melody, chords };
   }
 
-  // 브라우저는 동시에 살아 있는 AudioContext 수를 제한한다. 이 페이지는 반복
-  // 클릭이 용도이므로 새로 만들기 전에 이전 것을 닫는다.
-  let playing = null;
+  let audioCtx = null;
 
   document.getElementById('play').addEventListener('click', async () => {
-    if (playing) await playing.close();
-    const ctx = new AudioContext();
-    playing = ctx;
-    await ctx.resume();
-    const spec = buildSpec(ctx, 1);
-    const { durationSec } = buildGraph(ctx, spec);
+    if (!audioCtx) audioCtx = new AudioContext();
+    const startTime = await safeStartTime(audioCtx);
+    const spec = buildSpec(audioCtx, 1);
+    const { durationSec } = buildGraph(audioCtx, spec, startTime);
     log(`재생 ${durationSec.toFixed(2)}초`);
   });
 

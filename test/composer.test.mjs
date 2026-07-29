@@ -77,3 +77,26 @@ test('midiToHz: A4(69)는 440Hz, 한 옥타브 위는 두 배', () => {
   assert.ok(Math.abs(midiToHz(69) - 440) < 1e-9);
   assert.ok(Math.abs(midiToHz(81) - 880) < 1e-6);
 });
+
+test('referenceHz를 주면 곡 전체를 옥타브 단위로 이조한다', () => {
+  for (let seed = 0; seed < 10; seed++) {
+    const plain = composeMelody(16, seed);
+    const low = composeMelody(16, seed, 120);
+    // Math.abs를 거치는 이유: `-12 % 12`는 `-0`이고 assert/strict는 Object.is로
+    // 비교하므로 `-0 === 0`이 아니다. 아래로 이조될 때 그냥 `% 12`를 쓰면 실패한다.
+    assert.equal(Math.abs(low.tonicMidi - plain.tonicMidi) % 12, 0, '옥타브 단위가 아니다');
+    const shape = (m) => m.notes.map((n) => n.midi - m.tonicMidi);
+    assert.deepEqual(shape(low), shape(plain), '멜로디 윤곽이 바뀌었다');
+  }
+});
+
+test('이조하면 으뜸음이 화자 음높이 근처로 온다', () => {
+  for (let seed = 0; seed < 10; seed++) {
+    const ratio = midiToHz(composeMelody(16, seed, 120).tonicMidi) / 120;
+    assert.ok(ratio > 0.7 && ratio < 1.5, `seed=${seed} 비율 ${ratio}`);
+  }
+});
+
+test('referenceHz가 없으면 이조하지 않는다', () => {
+  assert.deepEqual(composeMelody(12, 3), composeMelody(12, 3, undefined));
+});

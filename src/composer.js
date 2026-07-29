@@ -23,13 +23,20 @@ function mulberry32(seed) {
 
 const PHRASE_LEN = 4;
 
-export function composeMelody(noteCount, seed) {
+export function composeMelody(noteCount, seed, referenceHz) {
   if (!Number.isInteger(noteCount) || noteCount < 1) {
     throw new RangeError(`noteCount는 1 이상의 정수여야 한다: ${noteCount}`);
   }
   const rnd = mulberry32(seed);
-  const tonicMidi = 60 + Math.floor(rnd() * 5); // C4~E4
+  let tonicMidi = 60 + Math.floor(rnd() * 5); // C4~E4
   const bpm = 96 + Math.floor(rnd() * 25); // 96~120
+
+  // 화자의 음높이에 맞춰 곡 전체를 옥타브 단위로 옮긴다. 조각마다 따로 접으면
+  // 음의 옥타브가 무작위로 튀어 멜로디 윤곽이 사라지므로 전곡을 한 번만 옮긴다.
+  // 화음도 tonicMidi에서 파생되므로 반주가 함께 따라온다.
+  if (referenceHz > 0) {
+    tonicMidi += 12 * Math.round(Math.log2(referenceHz / midiToHz(tonicMidi)));
+  }
 
   const makePhrase = () =>
     Array.from({ length: PHRASE_LEN }, () => ({
