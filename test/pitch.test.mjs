@@ -25,6 +25,18 @@ test('낮은 음(110Hz)도 1% 오차 안에 검출한다', () => {
   assert.ok(f0 !== null && Math.abs(f0 - 110) / 110 < 0.01, `검출값 ${f0}`);
 });
 
+test('탐색 범위 상한(1000Hz)에서도 옥타브 오류가 없다', () => {
+  const f0 = detectF0(sine(1000, 0.3), SR);
+  assert.ok(f0 !== null, 'null이 반환됐다');
+  assert.ok(Math.abs(f0 - 1000) / 1000 < 0.01, `검출값 ${f0} — 절반으로 읽혔을 수 있다`);
+});
+
+test('탐색 범위 하한(70Hz)도 검출한다', () => {
+  const f0 = detectF0(sine(70, 0.3), SR);
+  assert.ok(f0 !== null, 'null이 반환됐다');
+  assert.ok(Math.abs(f0 - 70) / 70 < 0.01, `검출값 ${f0}`);
+});
+
 test('무음은 null', () => {
   assert.equal(detectF0(new Float32Array(SR * 0.3), SR), null);
 });

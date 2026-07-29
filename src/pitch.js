@@ -5,6 +5,12 @@
 //
 // 국소 최대점들 중에서는 최고값의 90% 이상인 가장 짧은 주기를 택한다 —
 // 진짜 주기의 정수배 지점도 상관값이 높아 옥타브 오류가 나기 때문.
+//
+// 반환값은 `sampleRate / 정수 지연`이라 고음에서 해상도가 거칠다. 48kHz에서
+// 990Hz는 1000Hz로 읽힌다(오차 1%). 반음이 5.9%이므로 음정 판단에는 무해하다.
+//
+// 분석 창은 `maxLag * 2`(기본값 48kHz에서 28.5ms)로 고정된다. 음절이 300ms여도
+// 앞 28.5ms만 본다 — 음절 시작부의 음높이를 그 음절의 대표값으로 쓰는 것이다.
 
 export function detectF0(samples, sampleRate, opts = {}) {
   const { minHz = 70, maxHz = 1000, minClarity = 0.3 } = opts;
@@ -26,8 +32,10 @@ export function detectF0(samples, sampleRate, opts = {}) {
   }
   if (energy <= 1e-9) return null;
 
+  // lag 1부터 계산한다. minLag부터 시작하면 탐색 상한 근처의 진짜 주기가 배열
+  // 첫 칸에 놓여 양옆 비교를 못 해 후보에서 빠진다(실측: 1000Hz가 500Hz로).
   const corrs = [];
-  for (let lag = minLag; lag <= maxLag && lag < n; lag++) {
+  for (let lag = 1; lag <= maxLag && lag < n; lag++) {
     let dot = 0;
     let e1 = 0;
     let e2 = 0;
@@ -40,9 +48,17 @@ export function detectF0(samples, sampleRate, opts = {}) {
     corrs.push({ lag, c: norm > 0 ? dot / norm : 0 });
   }
 
+  // lag 0에서 내려오는 주 로브를 건너뛴다. 이 구간은 주기와 무관하게 상관값이
+  // 높아서, 후보로 두면 저음에서 짧은 지연이 뽑힌다(실측: 70Hz가 1000Hz로).
+  let from = 1;
+  while (from < corrs.length && corrs[from].c > 0) from++;
+
   const peaks = [];
-  for (let i = 1; i < corrs.length - 1; i++) {
-    if (corrs[i].c > corrs[i - 1].c && corrs[i].c >= corrs[i + 1].c) peaks.push(corrs[i]);
+  for (let i = from; i < corrs.length; i++) {
+    if (corrs[i].lag < minLag) continue;
+    const risesFromLeft = corrs[i].c > corrs[i - 1].c;
+    const holdsAgainstRight = i === corrs.length - 1 || corrs[i].c >= corrs[i + 1].c;
+    if (risesFromLeft && holdsAgainstRight) peaks.push(corrs[i]);
   }
   if (peaks.length === 0) return null;
 
