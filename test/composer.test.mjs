@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { composeMelody, chordsFor, midiToHz, PENTATONIC, VERSE_LEN } from '../src/composer.js';
+import { composeMelody, midiToHz, PENTATONIC, VERSE_LEN } from '../src/composer.js';
 
 test('요청한 개수만큼 음을 만든다', () => {
   for (const count of [1, 3, 8, 17, 24, 60, 137]) {
@@ -111,16 +111,6 @@ test('noteCount가 1 미만이면 예외', () => {
   assert.throws(() => composeMelody(0, 1), RangeError);
   assert.throws(() => composeMelody(-3, 1), RangeError);
   assert.throws(() => composeMelody(2.5, 1), RangeError);
-});
-
-test('화성은 멜로디 전체 길이를 덮는다 (긴 곡도)', () => {
-  const m = composeMelody(53, 3);
-  const totalBeats = m.notes.reduce((s, n) => s + n.beats, 0);
-  const chords = chordsFor(m);
-  assert.ok(chords.length > 0);
-  assert.equal(chords[0].startBeat, 0);
-  const covered = chords.reduce((s, c) => s + c.beats, 0);
-  assert.ok(Math.abs(covered - totalBeats) < 1e-9, `덮인 박 ${covered}, 전체 ${totalBeats}`);
 });
 
 test('midiToHz: A4(69)는 440Hz, 한 옥타브 위는 두 배', () => {

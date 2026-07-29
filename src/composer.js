@@ -106,28 +106,3 @@ export function composeMelody(noteCount, seed, referenceHz) {
     verseCount: Math.ceil(noteCount / VERSE_LEN),
   };
 }
-
-// I - V - vi - IV. 장·단을 degree 값으로 유추하지 않고 함께 선언한다 —
-// 진행에 다른 단화음을 넣을 때 고칠 곳이 한 군데여야 한다.
-const PROGRESSION = [
-  { degree: 0, minor: false },
-  { degree: 7, minor: false },
-  { degree: 9, minor: true },
-  { degree: 5, minor: false },
-];
-const BAR_BEATS = 4;
-
-export function chordsFor(melody) {
-  const totalBeats = melody.notes.reduce((s, n) => s + n.beats, 0);
-  const chords = [];
-  for (let startBeat = 0, i = 0; startBeat < totalBeats; startBeat += BAR_BEATS, i++) {
-    const { degree, minor } = PROGRESSION[i % PROGRESSION.length];
-    chords.push({
-      rootMidi: melody.tonicMidi - 12 + degree,
-      semitones: minor ? [0, 3, 7] : [0, 4, 7],
-      startBeat,
-      beats: Math.min(BAR_BEATS, totalBeats - startBeat),
-    });
-  }
-  return chords;
-}

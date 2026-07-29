@@ -1,6 +1,5 @@
 import { midiToHz } from './composer.js';
 
-const ACCOMP_GAIN = 0.5; // 목소리보다 약 6dB 낮게 — 가사가 묻히지 않게
 // 마지막 음이 끝난 뒤 남기는 여유. 재생 길이 보고와 오프라인 렌더 버퍼 할당이
 // 같은 값을 써야 한다 — 따로 두면 한쪽만 고쳤을 때 꼬리가 잘린다.
 const TAIL_SEC = 0.5;
@@ -54,71 +53,10 @@ function scheduleSegment(ctx, dest, buffer, seg, grain, targetHz, when, noteSec)
   body.stop(when + sounding);
 }
 
-function makeNoiseBuffer(ctx) {
-  const length = Math.round(ctx.sampleRate * 0.06);
-  const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
-  const data = buffer.getChannelData(0);
-  let s = 12345;
-  for (let i = 0; i < length; i++) {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    data[i] = s / 0x3fffffff - 1;
-  }
-  return buffer;
-}
-
-// 화성은 유지하되 소리를 바꿨다. 삼각파를 으뜸음 아래 옥타브에 깔았더니 화자
-// 음높이가 낮을 때 곡이 내려가면서 82~130Hz에서 웅웅거려 사용자가 "비프음"으로
-// 들었다(실측: 검출된 70·87·94·98·111·116·122·130Hz가 전부 이 패드였다).
-// 사인파로 바꾸고 으뜸음 위 옥타브로 올려 저역을 비우고, 마디마다 짧게 울리는
-// 아르페지오로 만들어 목소리 사이 여백을 메우지 않게 했다.
-function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat, startTime) {
-  for (const chord of chords) {
-    const barStart = startTime + chord.startBeat * secPerBeat;
-    chord.semitones.forEach((semitone, i) => {
-      // 화음 음을 한 박씩 흘려 짚는다 — 지속음이 아니라 또닥또닥 짚는 소리
-      const when = barStart + i * secPerBeat;
-      if (when >= barStart + chord.beats * secPerBeat) return;
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = midiToHz(chord.rootMidi + 12 + semitone);
-      const lp = ctx.createBiquadFilter();
-      lp.type = 'lowpass';
-      lp.frequency.value = 2000;
-      const gain = ctx.createGain();
-      const dur = secPerBeat * 0.45;
-      gain.gain.setValueAtTime(0, when);
-      gain.gain.linearRampToValueAtTime(0.07, when + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0008, when + dur);
-      osc.connect(lp);
-      lp.connect(gain);
-      gain.connect(dest);
-      osc.start(when);
-      osc.stop(when + dur);
-    });
-  }
-
-  // 8분음표 셰이커 — 정박을 조금 세게
-  const totalBeats = melody.notes.reduce((s, n) => s + n.beats, 0);
-  const noise = makeNoiseBuffer(ctx);
-  for (let beat = 0; beat < totalBeats; beat += 0.5) {
-    const when = startTime + beat * secPerBeat;
-    const src = ctx.createBufferSource();
-    src.buffer = noise;
-    const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass';
-    hp.frequency.value = 6000;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(beat % 1 === 0 ? 0.16 : 0.09, when);
-    gain.gain.exponentialRampToValueAtTime(0.001, when + 0.05);
-    src.connect(hp);
-    hp.connect(gain);
-    gain.connect(dest);
-    src.start(when);
-    src.stop(when + 0.06);
-  }
-}
-
-export function buildGraph(ctx, { audioBuffer, segments, grains, melody, chords }, startTime = 0) {
+// 반주를 두지 않는다. 화성 패드는 화자 음높이가 낮을 때 저역에서 웅웅거려
+// 사용자가 "비프음"으로 들었고, 셰이커까지 합쳐도 목소리를 가리기만 했다.
+// 박자는 음 사이 여백(NOTE_GAP)이 이미 만들어준다.
+export function buildGraph(ctx, { audioBuffer, segments, grains, melody }, startTime = 0) {
   if (segments.length !== melody.notes.length) {
     throw new RangeError(
       `segments(${segments.length})와 notes(${melody.notes.length}) 개수가 다르다 — 호출 전에 정규화할 것`,
@@ -131,14 +69,6 @@ export function buildGraph(ctx, { audioBuffer, segments, grains, melody, chords 
   master.gain.value = 0.9;
   master.connect(ctx.destination);
 
-  const voiceBus = ctx.createGain();
-  voiceBus.gain.value = 1;
-  voiceBus.connect(master);
-
-  const accompBus = ctx.createGain();
-  accompBus.gain.value = ACCOMP_GAIN;
-  accompBus.connect(master);
-
   // 각 음이 언제 울리는지 함께 돌려준다. 화면에서 음절 구슬을 소리에 맞춰 켜려면
   // 이 시각이 필요하고, UI가 따로 계산하면 타이밍 로직이 두 곳으로 갈라진다.
   const noteTimes = [];
@@ -147,11 +77,9 @@ export function buildGraph(ctx, { audioBuffer, segments, grains, melody, chords 
   melody.notes.forEach((note, i) => {
     noteTimes.push(when);
     const noteSec = note.beats * secPerBeat;
-    scheduleSegment(ctx, voiceBus, audioBuffer, segments[i], grains[i], midiToHz(note.midi), when, noteSec);
+    scheduleSegment(ctx, master, audioBuffer, segments[i], grains[i], midiToHz(note.midi), when, noteSec);
     when += noteSec;
   });
-
-  scheduleAccompaniment(ctx, accompBus, melody, chords, secPerBeat, startTime);
 
   return { durationSec: when - startTime + TAIL_SEC, master, noteTimes };
 }

@@ -1,6 +1,6 @@
 import { sliceSyllables } from './slicer.js';
 import { detectF0, findGrain } from './pitch.js';
-import { composeMelody, chordsFor, VERSE_LEN } from './composer.js';
+import { composeMelody, VERSE_LEN } from './composer.js';
 import { buildGraph, renderOffline, safeStartTime } from './synth.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
@@ -11,7 +11,7 @@ const MIN_NOTES = VERSE_LEN; // 최소 한 절
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
 
-let session = null; // { audioBuffer, segments, grains, transcript, rawCount, referenceHz, melody, chords }
+let session = null; // { audioBuffer, segments, grains, transcript, bounds, rawCount, referenceHz, melody }
 let seed = 1;
 let handle = null;
 let audioCtx = null;
@@ -166,7 +166,6 @@ function drawWaveform(samples, segments) {
 // 멜로디는 한 곳에서만 만든다. 재생·저장·안내 문구가 같은 곡을 봐야 한다.
 function refreshMelody() {
   session.melody = composeMelody(session.segments.length, seed, session.referenceHz);
-  session.chords = chordsFor(session.melody);
 }
 
 function analyze(audioBuffer, transcript) {
@@ -269,7 +268,6 @@ async function play() {
       segments: current.segments,
       grains: current.grains,
       melody: current.melody,
-      chords: current.chords,
     },
     startTime,
   );
@@ -283,7 +281,6 @@ async function save() {
     segments: session.segments,
     grains: session.grains,
     melody: session.melody,
-    chords: session.chords,
   });
   const channels = Array.from({ length: rendered.numberOfChannels }, (_, c) => rendered.getChannelData(c));
   const url = URL.createObjectURL(encodeWav(channels, rendered.sampleRate));

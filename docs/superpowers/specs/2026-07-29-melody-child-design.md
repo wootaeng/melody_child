@@ -40,7 +40,7 @@
 | `src/recorder.js` | 마이크 캡처, STT 병행, AudioBuffer 산출 | O |
 | `src/slicer.js` | 파형 → 음절 조각 경계 | X (순수) |
 | `src/pitch.js` | 조각 → 기본주파수 f0 | X (순수) |
-| `src/composer.js` | 조각 개수 → 멜로디·화성 | X (순수) |
+| `src/composer.js` | 조각 개수 → 멜로디 | X (순수) |
 | `src/synth.js` | 조각+멜로디 → 오디오 그래프 구성, 재생·오프라인 렌더 | O |
 | `src/exporter.js` | Float32 채널 → WAV Blob | X (순수) |
 | `src/ui.js` | 상태 머신(idle/recording/result), DOM | O |
@@ -65,21 +65,26 @@ sliceSyllables(samples: Float32Array, sampleRate: number, opts?) -> Segment[]
 
 // pitch.js
 detectF0(samples: Float32Array, sampleRate: number, opts?) -> number | null
+detectF0Detail(samples, sampleRate, opts?) -> { hz, clarity } | null
 //   자기상관. 탐색 범위 70~1000Hz. null = 무성음 또는 검출 실패
 //   opts 기본값: { minHz: 70, maxHz: 1000, minClarity: 0.3 }
+findGrain(samples, sampleRate, seg, opts?) -> { start, end, f0 } | null
+//   음절 중앙의 안정 구간에서 유지음 그레인을 찾아 주기의 정수배로 자른다.
+//   음절 전체를 한 비율로 밀면 억양이 살아남아 음정이 흐른다 — 그래서 필요하다.
 
 // composer.js
-composeMelody(noteCount: number, seed: number) -> Melody
+composeMelody(noteCount: number, seed: number, referenceHz?: number) -> Melody
 //   Melody: { notes: Note[], bpm: number, tonicMidi: number, verseLen: number, verseCount: number }
 //   Note: { midi: number, beats: number }
 //   notes.length === noteCount 를 항상 보장한다 (절을 반복해 채우고 남으면 자른다)
-chordsFor(melody: Melody) -> Chord[]
-//   Chord: { rootMidi: number, semitones: number[], startBeat: number, beats: number }
-
 // synth.js
-buildGraph(ctx, { audioBuffer, segments, f0s, melody, chords }) -> { durationSec }
+buildGraph(ctx, { audioBuffer, segments, grains, melody }, startTime?) -> { durationSec, master, noteTimes }
 //   ctx는 AudioContext 또는 OfflineAudioContext — 동일하게 동작해야 한다
-renderOffline({ audioBuffer, segments, f0s, melody, chords }) -> Promise<AudioBuffer>
+//   noteTimes[i] = i번째 음이 울리는 절대 시각 (화면 구슬 점등에 쓴다)
+renderOffline({ audioBuffer, segments, grains, melody }) -> Promise<AudioBuffer>
+safeStartTime(ctx, lead?) -> Promise<number>
+//   AudioContext는 resume 직후 currentTime이 0에 머물다 크게 점프한다(실측 약 1초).
+//   시계가 움직인 뒤의 안전한 시작 시각을 준다.
 
 // exporter.js
 encodeWav(channels: Float32Array[], sampleRate: number) -> Blob
@@ -118,9 +123,11 @@ Web Audio 스펙은 `playbackRate`와 `detune`을 곱해 하나의 재생 속도
 - 박자는 4/4, BPM 96~120 사이에서 시드로 결정
 - `seed`를 인자로 받으므로 테스트가 결정적이고, "새 멜로디" 버튼은 시드만 바꿔 호출한다
 
-### 반주
+### 반주 — 두지 않는다 (2026-07-30 실측 후 철회)
 
-화성은 I-V-vi-IV 진행. 삼각파 오실레이터로 패드를 깔고, 필터를 통과시킨 짧은 노이즈 버스트로 셰이커를 8분음표마다 넣는다. 목소리 조각보다 6dB 낮게 섞어 가사가 묻히지 않게 한다.
+처음에는 I-V-vi-IV 화성 패드와 8분음표 셰이커를 넣었다. 아이폰 실측에서 패드가 "비프음"으로 지적됐다 — 삼각파를 으뜸음 아래 옥타브에 깔아 화자 음높이가 낮을 때 82~130Hz에서 웅웅거렸고, 피치 측정까지 오염시켰다. 사인파 + 으뜸음 위 옥타브 + 아르페지오로 한 번 고쳤으나 사용자 판단으로 **반주를 통째로 제거**했다.
+
+박자는 음 사이 여백(`NOTE_GAP`)이 이미 만들어준다. 목소리 외에 아무것도 울리지 않으므로 아이 목소리가 곡의 전부다.
 
 ## 에러 처리
 
