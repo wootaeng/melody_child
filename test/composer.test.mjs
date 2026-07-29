@@ -40,6 +40,56 @@ test('마지막 음은 으뜸음이다', () => {
   }
 });
 
+test('멜로디는 인접한 음으로 걷는다 — 옥타브 점프 없음', () => {
+  for (let seed = 0; seed < 20; seed++) {
+    const m = composeMelody(16, seed);
+    for (const note of m.notes) {
+      const offset = note.midi - m.tonicMidi;
+      assert.ok(offset >= 0 && offset <= 9, `seed=${seed} 음역 이탈: ${offset}`);
+    }
+    const degrees = m.notes
+      .slice(0, m.verseLen)
+      .map((n) => PENTATONIC.indexOf(n.midi - m.tonicMidi));
+    const steps = degrees.slice(1).map((d, i) => Math.abs(d - degrees[i]));
+    const small = steps.filter((s) => s <= 1).length;
+    assert.ok(small / steps.length >= 0.5, `seed=${seed} 도약이 너무 많다: ${steps.join(',')}`);
+  }
+});
+
+test('절은 으뜸음으로 닫고 앞 프레이즈는 열어 둔다', () => {
+  for (let seed = 0; seed < 20; seed++) {
+    const m = composeMelody(16, seed);
+    const verse = m.notes.slice(0, m.verseLen);
+    assert.equal(verse.at(-1).midi, m.tonicMidi, `seed=${seed} 절이 으뜸음으로 닫히지 않았다`);
+    assert.notEqual(
+      verse[m.verseLen / 2 - 1].midi,
+      m.tonicMidi,
+      `seed=${seed} 앞 프레이즈가 으뜸음으로 닫혀 답할 것이 없다`,
+    );
+  }
+});
+
+test('리듬은 4분음표 위주이고 8분음표는 반드시 짝으로 붙는다', () => {
+  for (let seed = 0; seed < 20; seed++) {
+    const verse = composeMelody(16, seed).notes.slice(0, 8);
+    const isHalf = verse.map((n) => n.beats === 0.5);
+    assert.ok(
+      isHalf.filter(Boolean).length % 2 === 0,
+      `seed=${seed} 8분음표가 홀수 개다: ${verse.map((n) => n.beats).join(',')}`,
+    );
+    // 홀로 있는 8분음표가 없어야 한다 — 걸음이 절뚝인다
+    isHalf.forEach((half, i) => {
+      if (!half) return;
+      const paired = isHalf[i - 1] === true || isHalf[i + 1] === true;
+      assert.ok(paired, `seed=${seed} ${i}번째 8분음표가 홀로 있다`);
+    });
+    assert.ok(
+      verse.filter((n) => n.beats === 1).length >= 4,
+      `seed=${seed} 4분음표가 절반도 안 된다`,
+    );
+  }
+});
+
 test('BPM은 96~120 범위', () => {
   for (let seed = 0; seed < 20; seed++) {
     const { bpm } = composeMelody(8, seed);

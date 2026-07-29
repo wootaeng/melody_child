@@ -230,19 +230,40 @@ function stopPlayback() {
   if (session?.melody) drawBeads(session.melody, -1);
 }
 
+// iOS는 재생이 끝나면 컨텍스트를 interrupted 상태로 두는 경우가 있다. 그 상태의
+// 시계는 멈춰 있어서 그 시각에 스케줄하면 아무 소리도 나지 않는다 — "다시 듣기가
+// 안 된다"는 증상이 여기서 나온다. resume 후에도 running이 아니면 새로 만든다.
+async function playbackContext() {
+  if (audioCtx && audioCtx.state === 'closed') audioCtx = null;
+  if (!audioCtx) audioCtx = new AudioContext();
+  await audioCtx.resume();
+  if (audioCtx.state !== 'running') {
+    try {
+      await audioCtx.close();
+    } catch {
+      /* 이미 닫힌 경우 */
+    }
+    audioCtx = new AudioContext();
+    await audioCtx.resume();
+  }
+  return audioCtx;
+}
+
 async function play() {
   const token = ++playToken;
   stopPlayback();
   const current = session;
   if (!current) return;
 
-  if (!audioCtx) audioCtx = new AudioContext();
-  const startTime = await safeStartTime(audioCtx);
+  const ctx = await playbackContext();
+  const startTime = await safeStartTime(ctx);
   // await 사이에 다시 녹음·연타가 끼어들면 이 재생은 이미 무효다
   if (token !== playToken || session !== current) return;
 
+  // 전역 audioCtx가 아니라 이 호출이 받은 ctx를 쓴다 — playbackContext가
+  // 컨텍스트를 교체했을 수 있고, 그때 전역을 쓰면 엉뚱한 곳에 스케줄한다
   const { master, noteTimes } = buildGraph(
-    audioCtx,
+    ctx,
     {
       audioBuffer: current.audioBuffer,
       segments: current.segments,
@@ -253,7 +274,7 @@ async function play() {
     startTime,
   );
   playingMaster = master;
-  followBeads(audioCtx, noteTimes, current.melody);
+  followBeads(ctx, noteTimes, current.melody);
 }
 
 async function save() {
@@ -319,10 +340,27 @@ async function startSession() {
   el('live-transcript').textContent = '';
   el('stt-warning').hidden = isSpeechRecognitionSupported();
   show('recording');
+  startCountdown();
+}
+
+// 남은 시간 게이지. 애니메이션을 다시 붙이려면 클래스를 떼고 리플로를 한 번
+// 강제해야 한다 — 그러지 않으면 두 번째 녹음에서 게이지가 움직이지 않는다.
+function startCountdown() {
+  const bar = el('remaining');
+  bar.classList.remove('counting');
+  void bar.offsetWidth;
+  bar.style.animationDuration = `${MAX_RECORD_MS}ms`;
+  bar.classList.add('counting');
+  el('countdown-label').textContent = `${MAX_RECORD_MS / 1000}초 안에 말해 주세요`;
+}
+
+function stopCountdown() {
+  el('remaining').classList.remove('counting');
 }
 
 async function finishSession() {
   if (!handle) return;
+  stopCountdown();
   const current = handle;
   handle = null;
   let recording;

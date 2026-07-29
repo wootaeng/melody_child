@@ -91,18 +91,26 @@
 
   .hint { margin: 0.9rem 0 0; color: var(--ink-soft); font-size: 0.95rem; }
 
-  /* 녹음 중 신호. 진폭을 그리려면 analyser + rAF 루프가 필요한데
-     "듣고 있다"는 신호에는 과하다. CSS 애니메이션이면 JS가 0줄이다. */
+  /* 남은 녹음 시간 게이지. 줄어드는 폭이 곧 남은 시간이다 —
+     진폭을 그리는 것보다 아이에게 쓸모 있는 정보다. */
   #meter {
     height: 0.6rem;
     border-radius: 999px;
     background: var(--rule);
-    animation: listening 1.1s ease-in-out infinite;
+    overflow: hidden;
   }
-  @keyframes listening {
-    0%, 100% { background: var(--rule); }
-    50% { background: var(--voice); }
+  #remaining {
+    height: 100%;
+    background: var(--voice);
+    transform-origin: left center;
+    transform: scaleX(1);
   }
+  #remaining.counting { animation: countdown linear forwards; }
+  @keyframes countdown {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+  }
+  .countdown-label { margin: 0.5rem 0 0; font-size: 0.9rem; font-weight: 700; color: var(--ink-soft); }
 
   #live-transcript {
     margin: 1rem 0 0;
@@ -139,8 +147,10 @@
   #notice, #stt-warning { margin: 0.9rem 0 0; color: #9c4a1c; font-size: 0.95rem; }
   #notice:empty { display: none; }
 
+  /* 게이지는 남은 시간을 알려주는 정보라 reduced-motion에서도 유지한다.
+     대신 매끄러운 진행 대신 1초 단위로 끊어 움직이게 해 흐르는 느낌을 줄인다. */
   @media (prefers-reduced-motion: reduce) {
-    #meter { animation: none; background: var(--voice); }
+    #remaining.counting { animation-timing-function: steps(30, end); }
   }
 </style>
 
@@ -158,7 +168,8 @@
     </section>
 
     <section id="screen-recording" hidden>
-      <div id="meter"></div>
+      <div id="meter"><div id="remaining"></div></div>
+      <p class="countdown-label" id="countdown-label"></p>
       <p id="live-transcript"></p>
       <button id="stop">다 말했어요</button>
       <p id="stt-warning" hidden>이 브라우저는 받아쓰기를 지원하지 않아요. 노래는 그대로 만들어져요.</p>

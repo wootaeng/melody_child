@@ -5,7 +5,10 @@ const ACCOMP_GAIN = 0.5; // 목소리보다 약 6dB 낮게 — 가사가 묻히�
 // 같은 값을 써야 한다 — 따로 두면 한쪽만 고쳤을 때 꼬리가 잘린다.
 const TAIL_SEC = 0.5;
 
-const NOTE_GAP = 0.15; // 음 사이 여백 비율 — 없으면 음이 붙어 박자가 안 들린다
+const NOTE_GAP = 0.12; // 음 사이 여백 비율 — 없으면 음이 붙어 박자가 안 들린다
+// 자음을 이 비율까지 원음 속도로 들려준다. 너무 짧게 자르면 단어가 중간에
+// 끊겨 들린다(사용자 지적: "말이 끊겨서 나옴").
+const ATTACK_SHARE = 0.5;
 
 function scheduleSegment(ctx, dest, buffer, seg, grain, targetHz, when, noteSec) {
   const sr = buffer.sampleRate;
@@ -28,7 +31,7 @@ function scheduleSegment(ctx, dest, buffer, seg, grain, targetHz, when, noteSec)
   }
 
   const rate = targetHz / grain.f0;
-  const attackSec = Math.min((grain.start - seg.start) / sr, sounding * 0.35);
+  const attackSec = Math.min((grain.start - seg.start) / sr, sounding * ATTACK_SHARE);
   const hasAttack = attackSec > 0.015;
 
   // 자음은 원음 속도로 — 단어의 흔적이 여기 남는다
@@ -63,25 +66,35 @@ function makeNoiseBuffer(ctx) {
   return buffer;
 }
 
+// 화성은 유지하되 소리를 바꿨다. 삼각파를 으뜸음 아래 옥타브에 깔았더니 화자
+// 음높이가 낮을 때 곡이 내려가면서 82~130Hz에서 웅웅거려 사용자가 "비프음"으로
+// 들었다(실측: 검출된 70·87·94·98·111·116·122·130Hz가 전부 이 패드였다).
+// 사인파로 바꾸고 으뜸음 위 옥타브로 올려 저역을 비우고, 마디마다 짧게 울리는
+// 아르페지오로 만들어 목소리 사이 여백을 메우지 않게 했다.
 function scheduleAccompaniment(ctx, dest, melody, chords, secPerBeat, startTime) {
   for (const chord of chords) {
-    const when = startTime + chord.startBeat * secPerBeat;
-    const dur = chord.beats * secPerBeat;
-    for (const semitone of chord.semitones) {
+    const barStart = startTime + chord.startBeat * secPerBeat;
+    chord.semitones.forEach((semitone, i) => {
+      // 화음 음을 한 박씩 흘려 짚는다 — 지속음이 아니라 또닥또닥 짚는 소리
+      const when = barStart + i * secPerBeat;
+      if (when >= barStart + chord.beats * secPerBeat) return;
       const osc = ctx.createOscillator();
-      osc.type = 'triangle';
-      osc.frequency.value = midiToHz(chord.rootMidi + semitone);
+      osc.type = 'sine';
+      osc.frequency.value = midiToHz(chord.rootMidi + 12 + semitone);
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 2000;
       const gain = ctx.createGain();
-      // 패드는 마디를 다 채우지 않는다 — 목소리 사이 여백이 들려야 박자가 생긴다
-      const padDur = dur * 0.6;
+      const dur = secPerBeat * 0.45;
       gain.gain.setValueAtTime(0, when);
-      gain.gain.linearRampToValueAtTime(0.1, when + 0.04);
-      gain.gain.linearRampToValueAtTime(0, when + padDur);
-      osc.connect(gain);
+      gain.gain.linearRampToValueAtTime(0.07, when + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0008, when + dur);
+      osc.connect(lp);
+      lp.connect(gain);
       gain.connect(dest);
       osc.start(when);
-      osc.stop(when + padDur);
-    }
+      osc.stop(when + dur);
+    });
   }
 
   // 8분음표 셰이커 — 정박을 조금 세게
