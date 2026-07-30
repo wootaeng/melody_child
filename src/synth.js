@@ -223,6 +223,10 @@ export function voiceSpan(audioBuffer, bounds) {
 const GRID_MIN_SEC = 0.12;
 const GRID_MAX_SEC = 0.4;
 const DIVISIONS = [1, 2, 4, 8];
+// 배정 칸 수를 정할 때의 반올림 편향. 0.5면 보통 반올림이고, 낮출수록 내림이 잦아져
+// 삽입 침묵이 줄고 쉼이 짧아진다. 실기에서 "말이 살짝 끊긴다"의 원인이 그 침묵이라
+// 내림 쪽으로 둔다 — 격자 이탈이 커지면 이 값을 0.5로 되돌리면 된다.
+const GRID_ROUND_BIAS = 0.25;
 
 // 격자는 화자의 말 속도에서 고른다. 긴 쉼은 통계에서 빼고(쉼은 격자가 아니라
 // 배정 칸 수로 표현된다), 후보는 위 상·하한 안에서만 고른다.
@@ -252,8 +256,16 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
   let at = 0;
   for (const [i, seg] of bounds.entries()) {
     const syllableSec = (seg.end - seg.start) / sampleRate;
-    // 자연 간격을 격자로 반올림하되, 음절이 잘리지 않을 만큼은 반드시 준다
-    const units = Math.max(1, Math.round(spans[i] / gridSec), Math.ceil(syllableSec / gridSec));
+    // 자연 간격을 격자에 맞추되 **내림으로 편향**하고, 음절이 잘리지 않을 만큼은
+    // 반드시 준다. 편향의 이유: 배정 칸이 재료보다 길면 그 차이가 침묵이 되고
+    // (실기에서 7.3초가 7.8초로 늘어난 0.5초가 그것이다), 짧으면 음절 뒤의 쉼만
+    // 건너뛴다. 둘은 같은 반올림 오차의 두 방향이라 총량은 보존되므로 어디로
+    // 보낼지만 고를 수 있고, 소리가 사라지는 쪽보다 쉼이 짧아지는 쪽이 낫다.
+    const units = Math.max(
+      1,
+      Math.floor(spans[i] / gridSec + GRID_ROUND_BIAS),
+      Math.ceil(syllableSec / gridSec),
+    );
     const allotted = units * gridSec;
     placed.push({
       at,
@@ -265,6 +277,34 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
     at += allotted;
   }
   return { placed, totalSec: at, gridSec };
+}
+
+// 원본에서도 배치에서도 이어지는 조각을 하나로 합친다.
+//
+// 왜 필요한가: `scheduleVoiceChunk`는 조각마다 페이드 인·아웃을 건다. 그런데 정렬된
+// 조각 중 다수는 **원본의 연속 구간이고 배치도 연속**이라, 그 이음매의 페이드는 아무
+// 이유 없이 진폭을 0까지 떨어뜨렸다 올린다 — 페이드 아웃 20 + 삽입 침묵 42 + 페이드
+// 인 20ms 동안 소리가 죽는다(실기 지적 "말이 살짝 끊긴다"의 절반). 합쳐 두면 페이드가
+// **실제로 침묵이 있는 자리에만** 남고, 그 자리는 쉼이라 원래 안전하다.
+//
+// 두 조건이 모두 성립할 때만 합치므로 합친 결과는 원본을 한 번 복사한 것과 같다 —
+// 소리가 달라질 여지가 없다. 재료를 건너뛴 경계(배정 칸이 재료보다 짧은 경우)는
+// 원본에서 불연속이므로 합치지 않는다.
+export function mergeContiguous(placed, epsilon = 1e-9) {
+  const merged = [];
+  for (const chunk of placed) {
+    const prev = merged[merged.length - 1];
+    const joinsInOutput = prev && Math.abs(prev.at + prev.dur - chunk.at) < epsilon;
+    const joinsInSource = prev && Math.abs(prev.from + prev.dur - chunk.from) < epsilon;
+    if (joinsInOutput && joinsInSource) {
+      prev.dur += chunk.dur;
+      prev.units += chunk.units;
+      prev.syllableSec += chunk.syllableSec;
+      continue;
+    }
+    merged.push({ ...chunk }); // 호출자의 배열을 변형하지 않는다
+  }
+  return merged;
 }
 
 // 목소리를 먼저 정규화하고 그 위에서 멜로디 비율을 잡는다.
@@ -346,7 +386,8 @@ function buildChantGraph(
   let voiceSec = sec;
   if (align && bounds.length) {
     const { placed, totalSec } = alignToBeats(bounds, sr, 60 / melody.bpm);
-    for (const chunk of placed) {
+    // 이어지는 조각을 합쳐 불필요한 페이드를 없앤다 — 페이드는 침묵이 있는 자리에만 남는다
+    for (const chunk of mergeContiguous(placed)) {
       scheduleVoiceChunk(ctx, master, audioBuffer, startTime + chunk.at, chunk.from, chunk.dur, voiceGain);
     }
     voiceSec = totalSec;

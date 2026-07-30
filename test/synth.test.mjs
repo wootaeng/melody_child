@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { progressAt, voiceSpan, alignToBeats, mixLevels } from '../src/synth.js';
+import { progressAt, voiceSpan, alignToBeats, mergeContiguous, mixLevels } from '../src/synth.js';
 
 const SR = 48000;
 const at = (sec) => Math.round(sec * SR);
@@ -101,6 +101,105 @@ test('마지막 조각은 여운까지 쓰되 배정된 칸을 넘지 않는다'
   assert.ok(placed[0].dur <= placed[0].units * gridSec + 1e-9);
   assert.ok(placed[0].dur >= 0.2 - 1e-9, '음절이 잘렸다');
   assert.equal(placed[0].from, 1);
+});
+
+// 연속 조각 병합. 정렬된 조각 중 다수는 **원본에서도 연속이고 배치도 연속**인데,
+// 그 이음매에까지 페이드를 걸면 아무 이유 없이 진폭을 0까지 떨어뜨렸다 올린다
+// (실기 지적 "말이 살짝 끊긴다"의 원인 절반 — 페이드 20 + 침묵 42 + 페이드 20ms).
+// 합쳐 두면 페이드가 실제로 침묵이 있는 자리에만 남는다.
+
+// 어느 출력 샘플에서 원본의 어느 샘플이 들리는지. 병합이 이 매핑을 바꾸지 않아야
+// "같은 파형"이라는 주장이 성립한다.
+function sourceMap(placed) {
+  const map = new Map();
+  for (const c of placed) {
+    const at0 = Math.round(c.at * SR);
+    const from0 = Math.round(c.from * SR);
+    for (let i = 0; i < Math.round(c.dur * SR); i++) map.set(at0 + i, from0 + i);
+  }
+  return map;
+}
+
+// 쉼 없이 이어 말한 녹음. 자연 간격이 격자와 맞아떨어져 배정이 재료와 같아진다.
+const CONTIGUOUS = [
+  { start: at(0.0), end: at(0.3) },
+  { start: at(0.3), end: at(0.6) },
+  { start: at(0.6), end: at(0.9) },
+];
+
+test('원본에서 연속인 조각은 하나로 합쳐진다', () => {
+  const { placed } = alignToBeats(CONTIGUOUS, SR, 0.6);
+  const merged = mergeContiguous(placed);
+  assert.ok(merged.length < placed.length, `${placed.length} → ${merged.length}: 병합되지 않았다`);
+});
+
+test('병합은 어느 시각에 원본의 어디가 들리는지를 바꾸지 않는다', () => {
+  const { placed } = alignToBeats(CONTIGUOUS, SR, 0.6);
+  const before = sourceMap(placed);
+  const after = sourceMap(mergeContiguous(placed));
+  assert.equal(after.size, before.size, '재생되는 샘플 수가 달라졌다');
+  for (const [out, src] of before) {
+    assert.equal(after.get(out), src, `출력 ${out}번 샘플이 원본 ${src} → ${after.get(out)}로 바뀌었다`);
+  }
+});
+
+test('병합은 원본 placed를 변형하지 않는다', () => {
+  const { placed } = alignToBeats(CONTIGUOUS, SR, 0.6);
+  const durs = placed.map((c) => c.dur);
+  mergeContiguous(placed);
+  assert.deepEqual(placed.map((c) => c.dur), durs, '호출자의 배열이 바뀌었다');
+});
+
+// 삽입 침묵. 배정 칸이 재료보다 길면 그 차이가 침묵이 되고, 실기에서 목소리 7.3초가
+// 정렬 7.8초로 늘어난 0.5초(조각당 42ms)가 정확히 그것이었다.
+//
+// 침묵과 재료 건너뛰기는 **같은 반올림 오차의 두 방향**이다. 총량은 보존되므로
+// 어느 쪽으로 보낼지만 고를 수 있고, 침묵은 소리가 사라지는 반면 건너뛰기는
+// 음절 뒤의 쉼만 자른다(음절 자체는 ceil 하한이 지킨다). 그래서 내림으로 편향한다.
+
+// 실기 녹음에 가까운 픽스처: 실제 녹음은 음절 사이에 무음이 없어 슬라이서가 음절이
+// 아니라 어절 덩이를 잡고, 그 간격에 쉼이 섞인다.
+const PHRASES = [
+  { start: at(0.0), end: at(0.75) },
+  { start: at(0.95), end: at(1.6) },
+  { start: at(1.85), end: at(2.7) },
+  { start: at(3.0), end: at(3.85) },
+  { start: at(4.1), end: at(4.9) },
+];
+const PHRASE_NATURAL = 4.9 + 0.25; // voiceSpan과 같은 정의(마지막 끝 + 여운)
+
+test('배정 칸을 재료보다 길게 잡지 않는다 (삽입 침묵 ≤ 자연 길이의 2%)', () => {
+  const { placed, gridSec } = alignToBeats(PHRASES, SR, 0.625);
+  const silence = placed.reduce((sum, c) => sum + (c.units * gridSec - c.dur), 0);
+  assert.ok(
+    silence <= PHRASE_NATURAL * 0.02,
+    `침묵 ${(silence * 1000).toFixed(0)}ms — 자연 길이의 ${((silence / PHRASE_NATURAL) * 100).toFixed(1)}%`,
+  );
+});
+
+test('정렬이 말을 늘리지 않는다 (늘어난 만큼이 곧 침묵이다)', () => {
+  const { totalSec } = alignToBeats(PHRASES, SR, 0.625);
+  assert.ok(totalSec <= PHRASE_NATURAL + 1e-9, `${totalSec.toFixed(2)}초 > 자연 ${PHRASE_NATURAL}초`);
+  // 쉼이 통째로 사라지면 말이 뭉친다 — 압축에도 하한을 둔다
+  assert.ok(totalSec >= PHRASE_NATURAL * 0.8, `${totalSec.toFixed(2)}초로 압축됐다`);
+});
+
+test('재료를 건너뛴 경계는 병합하지 않는다 (페이드가 필요한 자리다)', () => {
+  // 배정 칸이 재료보다 짧으면 음절 뒤 쉼을 건너뛰고 다음 음절로 넘어간다 —
+  // 원본에서 불연속이므로 이음매에 페이드가 있어야 한다.
+  const bounds = [
+    { start: at(0.0), end: at(0.3) },
+    { start: at(0.8), end: at(1.1) },
+    { start: at(1.6), end: at(1.9) },
+  ];
+  const { placed } = alignToBeats(bounds, SR, 1.0);
+  const merged = mergeContiguous(placed);
+  for (let i = 1; i < merged.length; i++) {
+    const prev = merged[i - 1];
+    const skipped = Math.abs(prev.from + prev.dur - merged[i].from) > 1e-9;
+    const gap = Math.abs(prev.at + prev.dur - merged[i].at) > 1e-9;
+    assert.ok(skipped || gap, `조각 ${i - 1}·${i}는 연속인데 합쳐지지 않았다`);
+  }
 });
 
 // 음량: 목소리를 먼저 정규화하고 그 위에서 멜로디 비율을 잡는다. 절대 RMS에
