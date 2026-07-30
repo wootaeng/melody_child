@@ -1,5 +1,32 @@
 export const MAX_RECORD_MS = 30000;
 
+// 녹음을 이어붙일 때 사이에 넣는 무음. 두 이유로 필요하다: 슬라이서가 두 녹음을
+// 별개 조각으로 잡아야 하고(붙여 두면 마지막 음절과 첫 음절이 한 덩이가 된다),
+// 사람이 들을 때도 "문장이 나뉜" 느낌이 있어야 이어 말한 것처럼 뭉치지 않는다.
+export const JOIN_GAP_SEC = 0.25;
+// 이어붙일 수 있는 총 길이. 넘으면 분석·렌더가 길어지고 음절 수가 곡 길이를 밀어올린다.
+export const MAX_TOTAL_SEC = 120;
+
+// 녹음 여러 개를 하나로 잇는다. 브라우저 API를 모르는 순수 함수라 node --test로
+// 검증한다 — AudioBuffer 만들기는 호출자(ui.js)가 한다.
+//
+// 앞뒤 무음을 다듬지 않는다: 녹음 시작·끝의 침묵은 voiceSpan이 이미 잘라내고,
+// 여기서 손대면 "어디까지가 몇 번째 녹음인가"가 두 곳에서 결정된다.
+export function joinSamples(chunks, sampleRate, gapSec = JOIN_GAP_SEC) {
+  const parts = chunks.filter((c) => c && c.length > 0);
+  if (parts.length === 0) return new Float32Array(0);
+  if (parts.length === 1) return parts[0];
+  const gap = Math.max(0, Math.round(gapSec * sampleRate));
+  const total = parts.reduce((sum, c) => sum + c.length, 0) + gap * (parts.length - 1);
+  const out = new Float32Array(total);
+  let at = 0;
+  for (const [i, part] of parts.entries()) {
+    out.set(part, at);
+    at += part.length + (i < parts.length - 1 ? gap : 0);
+  }
+  return out;
+}
+
 export function isSpeechRecognitionSupported() {
   return typeof window !== 'undefined' && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 }

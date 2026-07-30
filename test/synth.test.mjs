@@ -439,12 +439,31 @@ test('작게 녹음해도 크게 녹음한 것과 같은 균형이 나온다', (
 });
 
 test('아주 작게 녹음하면 증폭 상한에 걸려 멜로디도 함께 작아진다', () => {
-  // 잡음까지 끌어올리지 않기 위한 상한(8배)의 대가다. 숨기지 않고 못 박아 둔다 —
-  // 진단 칩의 "증폭 8.0배"가 곧 "더 크게 말해야 한다"는 신호다.
-  const tiny = mixLevels(speechLike(0.05), 0, SR);
+  // 잡음까지 끌어올리지 않기 위한 상한(24배)의 대가다. 숨기지 않고 못 박아 둔다 —
+  // 진단 칩의 "증폭 24.0배"가 곧 "더 크게 말해야 한다"는 신호다.
+  const tiny = mixLevels(speechLike(0.01), 0, SR);
   const normal = mixLevels(speechLike(0.4), 0, SR);
-  assert.equal(tiny.voiceGain, 8);
+  assert.equal(tiny.voiceGain, 24);
   assert.ok(tiny.melodyLevel < normal.melodyLevel, `${tiny.melodyLevel} vs ${normal.melodyLevel}`);
+});
+
+test('작게 녹음해도 멜로디가 목소리를 덮지 않는다', () => {
+  // 실기 지적 "목소리가 좀 작으면 아예 사라진다". 원인은 두 상한이 겹친 것이었다 —
+  // 목소리는 8배까지만 커지는데 멜로디는 고정 하한 0.08 아래로 안 작아져서, 진폭 0.005
+  // 녹음에서 **멜로디가 목소리의 3.3배**가 됐다(그 위에 master가 1로 클램프돼 천장
+  // 여유 68%도 못 썼다). 이 단정이 그 조합을 다시 막는다.
+  const F = PRESET_RESONANCE * 1.2; // 피아노
+  for (const amp of [0.9, 0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005]) {
+    const m = mixLevels(speechLike(amp), 0, SR, undefined, F);
+    const voicePeak = Math.min(0.89, amp * m.voiceGain) * m.master;
+    const melodyPeak = m.melodyLevel * F * m.master;
+    assert.ok(
+      melodyPeak / voicePeak <= 1.6,
+      `amp ${amp}: 멜로디가 목소리의 ${(melodyPeak / voicePeak).toFixed(2)}배 (목소리 ${voicePeak.toFixed(3)})`,
+    );
+    // 절대 음량도 함께 본다 — 비율만 맞고 둘 다 작으면 여전히 안 들린다
+    assert.ok(voicePeak >= 0.3, `amp ${amp}: 목소리 피크가 ${voicePeak.toFixed(3)}까지 떨어졌다`);
+  }
 });
 
 test('정규화·합성 후에도 클리핑하지 않는다', () => {
@@ -529,9 +548,13 @@ test('멜로디 균형은 라이드 전 원본에서 재야 한다 (순서가 �
 });
 
 test('무음 녹음에서 증폭이 폭주하지 않는다', () => {
+  // 마스터가 천장 여유를 쓰게 되면서(예전 min(1, …)) 상한이 하나 더 필요해졌다 —
+  // 거의 무음인 녹음에서는 예측 피크가 0에 가까워 마스터가 발산한다.
   const mix = mixLevels(new Float32Array(SR), 0, SR);
-  assert.ok(mix.voiceGain <= 8, `${mix.voiceGain}`);
-  assert.ok(mix.melodyLevel >= 0.08 && mix.master > 0);
+  assert.ok(mix.voiceGain <= 24, `증폭 ${mix.voiceGain}`);
+  assert.ok(mix.master > 0 && mix.master <= 4, `마스터 ${mix.master}`);
+  const nearSilent = mixLevels(Float32Array.from({ length: SR }, (_, i) => 1e-5 * Math.sin(i)), 0, SR);
+  assert.ok(nearSilent.master <= 4, `거의 무음에서 마스터 ${nearSilent.master}`);
 });
 
 // 챈트가 목소리를 어디까지 흘려보내는지. 음절 사이를 건드리지 않는다는 것이

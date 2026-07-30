@@ -7,7 +7,9 @@ import {
 } from './synth.js';
 import { ridePlan } from './leveler.js';
 import { encodeWav } from './exporter.js';
-import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
+import {
+  startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS, joinSamples, MAX_TOTAL_SEC,
+} from './recorder.js';
 import { makeDevSample } from './devsample.js';
 import { INSTRUMENTS, DEFAULT_INSTRUMENT, pickInstrument } from './instruments.js';
 
@@ -574,6 +576,11 @@ async function selectInstrument(name) {
   if (session) await play();
 }
 
+// 다음 녹음을 기존 목소리 뒤에 이어붙일지. 결과 화면의 "이어서 녹음"이 켜고
+// finishSession이 소비한다 — 녹음 화면은 두 경우가 완전히 같아서(같은 카운트다운, 같은
+// 자동 정지) 화면을 나누지 않는다.
+let appendNext = false;
+
 async function startSession() {
   setNotice('');
   el('start').disabled = true;
@@ -630,17 +637,51 @@ async function finishSession() {
     show('idle');
     return;
   }
-  const analyzed = analyze(recording.audioBuffer, recording.transcript);
+  // 이어붙이기: 기존 목소리 뒤에 무음을 두고 새 녹음을 잇는다. **전체를 다시 분석한다** —
+  // 조각 경계를 오프셋만 옮겨 합치면 이음매의 음절이 두 규칙(예전 분석/새 분석)으로
+  // 갈라지고, 슬라이서의 임계값이 최대 프레임 기준이라 붙인 뒤의 값이 달라진다.
+  const prev = appendNext && session ? session : null;
+  appendNext = false;
+  let buffer = recording.audioBuffer;
+  let transcript = recording.transcript;
+  if (prev) {
+    const sr = prev.audioBuffer.sampleRate;
+    const joined = joinSamples(
+      [prev.audioBuffer.getChannelData(0), recording.audioBuffer.getChannelData(0)],
+      sr,
+    );
+    if (joined.length / sr > MAX_TOTAL_SEC) {
+      setNotice(`노래가 ${MAX_TOTAL_SEC}초를 넘어요. 저장한 뒤 새로 시작해 주세요.`);
+      showResult();
+      return;
+    }
+    buffer = makeBuffer(joined, sr);
+    transcript = [prev.transcript, recording.transcript].filter(Boolean).join(' ');
+  }
+
+  const analyzed = analyze(buffer, transcript);
   if (!analyzed) {
     setNotice('소리가 너무 작아요. 조금 더 크게 말해 주세요.');
-    show('idle');
+    // 이어붙이기가 실패해도 앞서 만든 노래는 남긴다 — 처음 녹음일 때만 첫 화면으로
+    if (session) showResult();
+    else show('idle');
     return;
   }
   session = analyzed;
-  seed = 1;
+  // 이어 녹음할 때는 시드를 유지한다 — 같은 시드면 앞부분 멜로디가 그대로라 곡이
+  // 길어지는 것으로 들린다. 시드까지 바뀌면 매번 다른 노래가 된다.
+  if (!prev) seed = 1;
   refreshMelody();
   showResult();
   play().catch(() => setNotice('노래를 틀지 못했어요. 다시 듣기를 눌러 주세요.'));
+}
+
+// 샘플 배열을 AudioBuffer로. 버퍼를 만들 뿐이라 오프라인 컨텍스트로 충분하다.
+function makeBuffer(samples, sampleRate) {
+  const ctx = new OfflineAudioContext(1, 1, sampleRate);
+  const buffer = ctx.createBuffer(1, samples.length, sampleRate);
+  buffer.copyToChannel(samples, 0);
+  return buffer;
 }
 
 function loadDevSample(glideCents) {
@@ -684,10 +725,20 @@ el('remix').addEventListener(
   }, '새 멜로디를 만들지 못했어요.'),
 );
 el('download').addEventListener('click', guarded(save, 'WAV 파일을 만들지 못했어요.'));
+// 이어서 녹음: 세션을 **버리지 않고** 다음 녹음을 뒤에 붙인다. "다시 녹음"과 다른
+// 점은 그것뿐이라 녹음 화면·카운트다운·자동 정지를 그대로 쓴다.
+el('append').addEventListener('click', () => {
+  stopPlayback();
+  setNotice('');
+  appendNext = true;
+  startSession();
+});
+
 el('again').addEventListener('click', () => {
   stopPlayback();
   dropSong();
   session = null;
+  appendNext = false; // 이어붙이기를 눌렀다가 다시 녹음으로 왔을 때 남지 않게
   setNotice('');
   drawBeads(null);
   show('idle');

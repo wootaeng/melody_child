@@ -375,7 +375,17 @@ export function alignToBeats(
 // (실기 지적: "멜로디가 작다 / 내 녹음이 작아서인가" — 그렇다). 목소리 피크를
 // 먼저 기준선까지 올려 두면 마이크 레벨과 무관하게 둘의 균형이 같아진다.
 const VOICE_PEAK = 0.89; // 정규화 목표 피크
-const VOICE_GAIN_MAX = 8; // 무음·잡음만 있는 녹음을 증폭하지 않기 위한 상한
+// 무음·잡음만 있는 녹음을 증폭하지 않기 위한 상한.
+//
+// 8이었고 그것이 "목소리가 좀 작으면 아예 사라진다"의 절반이었다 — 조용히 말한 녹음은
+// 8배로도 목표 피크에 못 닿아 목소리 피크가 0.037까지 떨어졌다(실측). 24면 진폭 0.037
+// 녹음까지 목표에 닿는다. 대가는 잡음도 24배가 되는 것인데, 실측에서 목소리 대비
+// -18dB이라 들리긴 해도 묻히는 편이 낫다. 진단 칩의 `증폭 24.0배`가 "더 크게 말하라"는
+// 신호다(예전 8.0배와 같은 역할).
+const VOICE_GAIN_MAX = 24;
+// 마스터가 천장 여유를 쓸 수 있는 상한. 거의 무음인 녹음에서 잡음만 폭주하는 것을 막는다 —
+// 이 값에 걸리면 아무리 눌러도 소리가 작다는 뜻이고, 그때는 실제로 더 크게 말해야 한다.
+const MASTER_MAX = 4;
 // 정규화된 목소리 RMS 대비 멜로디 진폭. 실기 청취로 정했다(1 → 작다, 2.2 → 여전히
 // 작다, 3 → 적당, 9차에서 3 → "조금 줄였으면"). 배음을 얹어 지각 음량이 함께 올랐으므로
 // 이 숫자만의 결과는 아니다. 화면 버튼으로 조절하므로(ui.js의 MELODY_LEVELS) 이 값은
@@ -417,15 +427,22 @@ export function mixLevels(samples, fromSample, lengthSamples, ratio = MELODY_TO_
   }
   const rms = n ? Math.sqrt(sum / n) : 0;
   const voiceGain = Math.min(VOICE_GAIN_MAX, Math.max(1, VOICE_PEAK / Math.max(0.02, peak)));
+  const voicePeak = Math.min(VOICE_PEAK, peak * voiceGain);
   // 상한은 실질적으로 걸리지 않게 둔다. 0.6으로 두니 보통 음량 녹음에서 걸려
   // 비율이 아니라 상한이 음량을 결정했다(테스트에서 0.445 vs 0.6으로 갈렸다).
   // 합이 1을 넘는 문제는 아래 마스터가 비율을 유지한 채 눌러서 해결한다.
-  const melodyLevel = Math.min(1, Math.max(0.08, rms * voiceGain * ratio));
-  // 정규화한 목소리 피크와 멜로디가 겹쳐도 1을 넘지 않게 눌러 둔다(비율은 유지)
-  const master = Math.min(
-    1,
-    0.97 / (Math.min(VOICE_PEAK, peak * voiceGain) + melodyLevel * melodyPeakFactor),
-  );
+  //
+  // **하한을 목소리 피크에 연동한다.** 고정 0.08은 작게 녹음한 날 목소리보다 커졌다
+  // (실측: 목소리 피크 0.037 대 멜로디 0.121 — 멜로디가 3.3배로 목소리를 덮었다.
+  // 실기 지적 "목소리가 좀 작으면 아예 사라진다"가 이것이다). 하한의 목적은 멜로디가
+  // 아예 안 들리지 않게 하는 것인데, 목소리가 그보다 작으면 목적이 뒤집힌다.
+  const melodyLevel = Math.min(1, Math.max(Math.min(0.08, voicePeak * 0.5), rms * voiceGain * ratio));
+  // 목소리 피크와 멜로디가 겹쳐도 천장을 넘지 않게 맞춘다. **1로 클램프하지 않는다** —
+  // 예전에는 min(1, …)이라 작게 녹음한 날 천장에 68%가 남아도 쓰지 못했다(실측: 목소리
+  // 피크가 0.32까지 떨어지는데 마스터는 1). 비율은 그대로이므로 이건 볼륨 손잡이다.
+  // MASTER_MAX가 없으면 거의 무음인 녹음에서 잡음만 폭주한다.
+  const predicted = voicePeak + melodyLevel * melodyPeakFactor;
+  const master = predicted > 0 ? Math.min(MASTER_MAX, 0.97 / predicted) : 1;
   return { voiceGain, melodyLevel, master };
 }
 
