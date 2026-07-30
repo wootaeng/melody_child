@@ -111,36 +111,86 @@ function scheduleSegment(ctx, dest, buffer, seg, grain, voice, targetHz, when, n
   body.stop(when + sounding);
 }
 
-// 반주(아르페지오)는 기본으로 두지 않는다 — 예전 저역 삼각파 패드가 화자 음높이가
-// 낮을 때 웅웅거려 사용자가 "비프음"으로 들었다. 그래서 사인파 + 저역통과에
-// 으뜸음 **위** 옥타브로 올려 한 박씩 짚는 형태로만 되살렸고, 켜는 건 선택이다.
-// 목소리를 그대로 두고(챈트) 반주가 멜로디를 담당하는 조합을 청취 비교하기 위한 것.
-function schedulePad(ctx, dest, melody, startTime) {
+// 멜로디를 악기로 연주한다. 사인파 + 저역통과에 으뜸음 위 옥타브 — 예전 저역
+// 삼각파 패드가 화자 음높이가 낮을 때 웅웅거려 사용자가 "비프음"으로 들었기
+// 때문에 위로 올리고 순한 파형을 쓴다. 목소리가 위에 얹히도록 작게 깐다.
+//
+// 음 시각을 돌려주는 쪽이 이 함수다 — 화면 구슬이 이 시각을 그대로 쓴다.
+function scheduleMelody(ctx, dest, melody, startTime, level) {
   const secPerBeat = 60 / melody.bpm;
-  const totalBeats = melody.notes.reduce((sum, n) => sum + n.beats, 0);
   const lowpass = ctx.createBiquadFilter();
   lowpass.type = 'lowpass';
-  lowpass.frequency.value = 1200;
+  lowpass.frequency.value = 1400;
   lowpass.connect(dest);
 
-  const steps = [0, 4, 7, 4]; // 으뜸 3화음을 오르내린다
-  for (let beat = 0; beat < Math.floor(totalBeats); beat++) {
-    const when = startTime + beat * secPerBeat;
+  const noteTimes = [];
+  let when = startTime;
+  for (const note of melody.notes) {
+    const noteSec = note.beats * secPerBeat;
+    noteTimes.push(when);
     const osc = ctx.createOscillator();
     osc.type = 'sine';
-    osc.frequency.value = midiToHz(melody.tonicMidi + 12 + steps[beat % steps.length]);
+    osc.frequency.value = midiToHz(note.midi);
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(0, when);
-    gain.gain.linearRampToValueAtTime(0.12, when + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, when + secPerBeat * 0.9);
+    gain.gain.linearRampToValueAtTime(level, when + 0.02);
+    gain.gain.exponentialRampToValueAtTime(level * 0.4, when + noteSec * 0.85);
+    gain.gain.linearRampToValueAtTime(0, when + noteSec);
     osc.connect(gain);
     gain.connect(lowpass);
     osc.start(when);
-    osc.stop(when + secPerBeat);
+    osc.stop(when + noteSec);
+    when += noteSec;
   }
+  return { noteTimes, endTime: when };
 }
 
-export function buildGraph(ctx, { audioBuffer, segments, grains, voices, melody, pad }, startTime = 0) {
+// 녹음에서 목소리가 실제로 있는 구간. 앞뒤 침묵만 잘라내고 **음절 사이는 건드리지
+// 않는다** — 조각을 잘라 이어붙이면 그 사이의 자연스러운 이음새가 사라져 말이
+// 뚝뚝 끊긴다(실기 지적). 챈트 렌더와 화면이 같은 값을 봐야 하므로 여기 한 곳에서만 정한다.
+export function voiceSpan(audioBuffer, bounds) {
+  const sr = audioBuffer.sampleRate;
+  if (!bounds || bounds.length === 0) return { from: 0, sec: audioBuffer.duration };
+  const from = bounds[0].start / sr;
+  const to = Math.min(audioBuffer.duration, bounds[bounds.length - 1].end / sr + 0.25);
+  return { from, sec: Math.max(0.1, to - from) };
+}
+
+// 챈트: 목소리를 자르지 않고 통째로 흘려보내고 멜로디를 아래에 깐다.
+//
+// 음절을 박자에 맞춰 재배치하면 (1) 조각 사이 이음새가 사라지고 (2) 음보다 짧은
+// 음절 뒤에 침묵이 들어가 말이 끊긴다. 목소리를 그대로 두면 둘 다 사라지는 대신
+// 목소리가 박에 정렬되지 않는다 — 랩·챈트 트랙이 쓰는 교환이다.
+function buildChantGraph(ctx, { audioBuffer, bounds, melody }, startTime) {
+  const master = ctx.createGain();
+  master.gain.value = 0.9;
+  master.connect(ctx.destination);
+
+  const { from, sec } = voiceSpan(audioBuffer, bounds);
+  const gain = ctx.createGain();
+  // 20ms 페이드 — 잘린 자리에서 딱 소리가 나지 않게. 그 사이는 손대지 않는다.
+  gain.gain.setValueAtTime(0, startTime);
+  gain.gain.linearRampToValueAtTime(1, startTime + 0.02);
+  gain.gain.setValueAtTime(1, startTime + sec - 0.02);
+  gain.gain.linearRampToValueAtTime(0, startTime + sec);
+  gain.connect(master);
+
+  const src = ctx.createBufferSource();
+  src.buffer = audioBuffer;
+  src.connect(gain);
+  src.start(startTime, from, sec);
+
+  const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, 0.16);
+  return {
+    durationSec: Math.max(sec, endTime - startTime) + TAIL_SEC,
+    master,
+    noteTimes,
+  };
+}
+
+export function buildGraph(ctx, spec, startTime = 0) {
+  if (spec.chant) return buildChantGraph(ctx, spec, startTime);
+  const { audioBuffer, segments, grains, voices, melody, pad } = spec;
   if (segments.length !== melody.notes.length) {
     throw new RangeError(
       `segments(${segments.length})와 notes(${melody.notes.length}) 개수가 다르다 — 호출 전에 정규화할 것`,
@@ -158,7 +208,7 @@ export function buildGraph(ctx, { audioBuffer, segments, grains, voices, melody,
   master.gain.value = 0.9;
   master.connect(ctx.destination);
 
-  if (pad) schedulePad(ctx, master, melody, startTime);
+  if (pad) scheduleMelody(ctx, master, melody, startTime, 0.1);
 
   // 각 음이 언제 울리는지 함께 돌려준다. 화면에서 음절 구슬을 소리에 맞춰 켜려면
   // 이 시각이 필요하고, UI가 따로 계산하면 타이밍 로직이 두 곳으로 갈라진다.
@@ -206,11 +256,11 @@ export function progressAt(noteTimes, t) {
 // 내려받는 파일이 같은 바이트여야 하고, 경로가 갈라지면 한쪽만 고쳐진다.
 // noteTimes를 함께 돌려주는 이유: 화면이 박자를 다시 계산하면 소리와 어긋난다.
 export async function renderOffline(spec) {
-  const secPerBeat = 60 / spec.melody.bpm;
-  const totalBeats = spec.melody.notes.reduce((s, n) => s + n.beats, 0);
   const sampleRate = spec.audioBuffer.sampleRate;
-  const length = Math.ceil((totalBeats * secPerBeat + TAIL_SEC) * sampleRate);
-  const ctx = new OfflineAudioContext(2, length, sampleRate);
+  const melodySec = spec.melody.notes.reduce((sum, n) => sum + n.beats, 0) * (60 / spec.melody.bpm);
+  // 챈트는 목소리를 자르지 않으므로 목소리와 멜로디 중 긴 쪽이 곡 길이다
+  const songSec = spec.chant ? Math.max(voiceSpan(spec.audioBuffer, spec.bounds).sec, melodySec) : melodySec;
+  const ctx = new OfflineAudioContext(2, Math.ceil((songSec + TAIL_SEC) * sampleRate), sampleRate);
   const { noteTimes, durationSec } = buildGraph(ctx, spec);
   const buffer = await ctx.startRendering();
   return { buffer, noteTimes, durationSec };

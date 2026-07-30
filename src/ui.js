@@ -2,7 +2,7 @@ import { sliceSyllables } from './slicer.js';
 import { findGrain } from './pitch.js';
 import { findPitchMarks } from './psola.js';
 import { composeMelody, VERSE_LEN } from './composer.js';
-import { renderOffline, progressAt, renderVoices } from './synth.js';
+import { renderOffline, progressAt, renderVoices, voiceSpan } from './synth.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
 import { makeDevSample } from './devsample.js';
@@ -196,24 +196,32 @@ function drawWaveform(samples, segments) {
 // 재생 직전에 만들면 시작 시각을 잡은 뒤 수십 ms를 먹어 첫 음이 밀린다.
 function refreshMelody() {
   dropSong();
-  session.melody = composeMelody(session.segments.length, seed, session.referenceHz, {
-    degrees: mode === 'narrow' ? NARROW_DEGREES : undefined,
-  });
-  session.voices = renderVoices(session.audioBuffer.getChannelData(0), session.audioBuffer.sampleRate, session);
+  const degrees = mode === 'narrow' ? NARROW_DEGREES : undefined;
+  const chant = mode === 'chant';
+
+  // 챈트는 목소리를 자르지 않으므로 음 개수가 음절 수에 묶이지 않는다 — 녹음
+      // 길이를 덮을 만큼 만든다. 박 길이를 알려면 bpm이 필요하고 bpm은 시드에서만
+  // 나오므로 한 음짜리로 한 번 떠본다(같은 시드면 같은 bpm이다).
+  let noteCount = session.segments.length;
+  if (chant) {
+    const bpm = composeMelody(1, seed, session.referenceHz, { degrees }).bpm;
+    const voiceSec = voiceSpan(session.audioBuffer, session.bounds).sec;
+    noteCount = Math.max(VERSE_LEN, Math.ceil(voiceSec / (60 / bpm)));
+  }
+
+  session.melody = composeMelody(noteCount, seed, session.referenceHz, { degrees });
+  // 챈트는 음절을 옮기지 않으니 목소리 버퍼를 만들 필요가 없다
+  session.voices = chant
+    ? null
+    : renderVoices(session.audioBuffer.getChannelData(0), session.audioBuffer.sampleRate, session);
 }
 
 // 렌더에 넘길 재료. 모드에 따라 목소리를 손대는 정도만 달라진다 —
 // 박자·구슬·저장은 전부 같은 경로를 탄다.
 function renderSpec() {
-  const chant = mode === 'chant';
-  return {
-    ...session,
-    // 챈트: 음정을 아예 옮기지 않는다. grains를 비우면 scheduleSegment가 원음을
-    // 그대로 리듬에 얹는 경로(무성 자음용)를 타므로 새 분기를 만들 필요가 없다.
-    grains: chant ? session.grains.map(() => null) : session.grains,
-    voices: chant ? session.voices.map(() => null) : session.voices,
-    pad: withPad,
-  };
+  // 챈트는 목소리를 통째로 흘려보내고 멜로디를 아래에 깐다(chant 플래그).
+  // 나머지 모드는 음절을 음정으로 옮겨 배치하고, 멜로디 반주는 선택이다.
+  return { ...session, chant: mode === 'chant', pad: withPad };
 }
 
 function analyze(audioBuffer, transcript) {
@@ -349,19 +357,27 @@ async function save() {
 // PSOLA가 몇 음에 실제로 적용됐는지가 핵심이다(폴백 그레인 루프가 곧 비프음이다).
 function diagnostics() {
   const sr = session.audioBuffer.sampleRate;
-  const spans = session.pitchMarks.map((pm) => (pm ? pm.marks[pm.marks.length - 1] - pm.marks[0] : 0));
-  const used = session.voices.map((v, i) => (v && spans[i] > 0 ? i : -1)).filter((i) => i >= 0);
-  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
   const midis = session.melody.notes.map((n) => n.midi);
-  return [
+  const facts = [
     `mode ${mode}${withPad ? '+pad' : ''}`,
-    `psola ${mode === 'chant' ? 0 : session.voices.filter(Boolean).length}/${session.voices.length}`,
-    `재료 ${Math.round((avg(used.map((i) => spans[i])) / sr) * 1000)}ms`,
-    `채움 ${avg(used.map((i) => session.voices[i].length / spans[i])).toFixed(1)}배`,
     `기준 ${Math.round(session.referenceHz || 0)}Hz`,
     `${session.melody.bpm}bpm`,
     `midi ${Math.min(...midis)}~${Math.max(...midis)}`,
   ];
+  if (!session.voices) {
+    // 챈트는 목소리를 손대지 않으므로 통째로 흘려보내는 길이가 곧 진단값이다
+    facts.push(`목소리 ${voiceSpan(session.audioBuffer, session.bounds).sec.toFixed(1)}초 통째로`);
+    return facts;
+  }
+  const spans = session.pitchMarks.map((pm) => (pm ? pm.marks[pm.marks.length - 1] - pm.marks[0] : 0));
+  const used = session.voices.map((v, i) => (v && spans[i] > 0 ? i : -1)).filter((i) => i >= 0);
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  facts.push(
+    `psola ${session.voices.filter(Boolean).length}/${session.voices.length}`,
+    `재료 ${Math.round((avg(used.map((i) => spans[i])) / sr) * 1000)}ms`,
+    `채움 ${avg(used.map((i) => session.voices[i].length / spans[i])).toFixed(1)}배`,
+  );
+  return facts;
 }
 
 function showResult() {

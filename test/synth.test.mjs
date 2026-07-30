@@ -1,6 +1,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { progressAt } from '../src/synth.js';
+import { progressAt, voiceSpan } from '../src/synth.js';
+
+// 챈트가 목소리를 어디까지 흘려보내는지. 음절 사이를 건드리지 않는다는 것이
+// 이 함수의 요점이다 — 조각을 잘라 이어붙이면 말이 뚝뚝 끊긴다(실기 지적).
+test('앞뒤 침묵만 잘라내고 음절 사이는 그대로 둔다', () => {
+  const buffer = { sampleRate: 48000, duration: 10 };
+  const bounds = [
+    { start: 48000, end: 72000 }, // 1.0~1.5초
+    { start: 120000, end: 144000 }, // 2.5~3.0초
+  ];
+  const span = voiceSpan(buffer, bounds);
+  assert.equal(span.from, 1);
+  // 마지막 음절 끝(3.0초) + 여운 0.25초까지 = 2.25초 분량. 사이의 1초 공백도
+  // 그대로 포함된다(자연스러운 이음새라 잘라내면 안 된다).
+  assert.equal(+span.sec.toFixed(3), 2.25);
+});
+
+test('꼬리 여운이 녹음 끝을 넘지 않는다', () => {
+  const buffer = { sampleRate: 48000, duration: 2 };
+  const span = voiceSpan(buffer, [{ start: 0, end: 96000 }]);
+  assert.equal(span.from, 0);
+  assert.equal(span.sec, 2);
+});
+
+test('조각이 없으면 녹음 전체', () => {
+  const buffer = { sampleRate: 48000, duration: 3.5 };
+  assert.deepEqual(voiceSpan(buffer, []), { from: 0, sec: 3.5 });
+  assert.deepEqual(voiceSpan(buffer, null), { from: 0, sec: 3.5 });
+});
 
 // 진행선의 위치 계산. 캔버스 그리기는 이 하네스에서 관측할 수 없다(창이 가려져
 // 있으면 rAF가 1초에 0프레임 — 실측). 그래서 시간→위치 매핑만 여기서 못 박고
