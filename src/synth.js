@@ -156,33 +156,127 @@ export function voiceSpan(audioBuffer, bounds) {
   return { from, sec: Math.max(0.1, to - from) };
 }
 
-// 챈트: 목소리를 자르지 않고 통째로 흘려보내고 멜로디를 아래에 깐다.
+// 음절 시작을 박에 맞추되 **음절 자체는 자르지 않는다**.
 //
-// 음절을 박자에 맞춰 재배치하면 (1) 조각 사이 이음새가 사라지고 (2) 음보다 짧은
-// 음절 뒤에 침묵이 들어가 말이 끊긴다. 목소리를 그대로 두면 둘 다 사라지는 대신
-// 목소리가 박에 정렬되지 않는다 — 랩·챈트 트랙이 쓰는 교환이다.
-function buildChantGraph(ctx, { audioBuffer, bounds, melody }, startTime) {
-  const master = ctx.createGain();
-  master.gain.value = 0.9;
-  master.connect(ctx.destination);
+// 목소리를 통째로 흘려보내면 말은 안 끊기지만 박에 안 맞아 거슬린다(실기 지적).
+// 음절을 늘리거나 자르면 다시 기계음·끊김이 된다. 그래서 손대는 것은 **음절 뒤의
+// 쉼**뿐이다 — 쉼은 길이를 바꿔도 아티팩트가 없는 유일한 재료다.
+//
+// 격자는 박이 아니라 **자연스러운 음절 간격**에 맞춰 고른다. 4분음표 격자에 한
+// 음절씩 놓으면 말이 실제 속도보다 훨씬 느려져 사이가 벌어진다(실측: 2.2초 발화가
+// 3.75초로 늘어나고 음절마다 0.26초 침묵). 사람은 초당 4~5음절을 말하는데 96bpm의
+// 한 박은 0.63초다 — 8분·16분음표까지 후보에 두고 중앙값 간격에 가장 가까운 것을 쓴다.
+//
+// 각 음절이 차지하는 칸 수는 자연 간격을 격자로 반올림한 값이다. 그래서 원래 리듬이
+// 유지되고(빠르게 말한 곳은 붙어 있다) 총 길이도 거의 그대로다.
+const DIVISIONS = [1, 2, 4];
 
-  const { from, sec } = voiceSpan(audioBuffer, bounds);
+export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
+  const onsets = bounds.map((seg) => seg.start / sampleRate);
+  // 이 음절이 쓸 수 있는 재료 = 다음 음절 시작까지(사이의 숨·이음새 포함)
+  const spans = bounds.map(
+    (seg, i) => (i + 1 < bounds.length ? onsets[i + 1] : seg.end / sampleRate + tailSec) - onsets[i],
+  );
+  const sorted = [...spans].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] || beatSec;
+
+  let gridSec = beatSec;
+  for (const div of DIVISIONS) {
+    if (Math.abs(beatSec / div - median) < Math.abs(gridSec - median)) gridSec = beatSec / div;
+  }
+
+  const placed = [];
+  let at = 0;
+  for (const [i, seg] of bounds.entries()) {
+    const syllableSec = (seg.end - seg.start) / sampleRate;
+    // 자연 간격을 격자로 반올림하되, 음절이 잘리지 않을 만큼은 반드시 준다
+    const units = Math.max(1, Math.round(spans[i] / gridSec), Math.ceil(syllableSec / gridSec));
+    const allotted = units * gridSec;
+    placed.push({
+      at,
+      from: onsets[i],
+      dur: Math.min(spans[i], allotted),
+      syllableSec,
+      units,
+    });
+    at += allotted;
+  }
+  return { placed, totalSec: at, gridSec };
+}
+
+// 목소리와 멜로디의 음량 비. 고정 숫자로 두면 마이크 레벨이 다른 녹음마다
+// 어긋난다("목소리만 크다") — 목소리 RMS에 비례해 정하고, 둘의 합이 1을 넘지
+// 않게 마스터로 눌러 클리핑을 막는다(비율은 유지된다).
+const MELODY_TO_VOICE = 1.6;
+
+export function mixLevels(samples, fromSample, lengthSamples) {
+  let sum = 0;
+  let peak = 0;
+  const end = Math.min(samples.length, fromSample + lengthSamples);
+  let n = 0;
+  for (let i = Math.max(0, fromSample); i < end; i++) {
+    const a = samples[i];
+    sum += a * a;
+    n++;
+    if (Math.abs(a) > peak) peak = Math.abs(a);
+  }
+  const rms = n ? Math.sqrt(sum / n) : 0;
+  const melodyLevel = Math.min(0.45, Math.max(0.12, rms * MELODY_TO_VOICE));
+  return { melodyLevel, master: Math.min(0.9, 0.98 / Math.max(0.01, peak + melodyLevel)) };
+}
+
+const FADE_SEC = 0.02; // 조각 경계에서 딱 소리가 나지 않을 만큼만
+
+// 한 덩이의 목소리를 페이드 인·아웃으로 얹는다. 잘린 자리는 쉼 구간이므로
+// 이 페이드가 말을 건드리지 않는다.
+function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur) {
+  const fade = Math.min(FADE_SEC, dur / 3);
   const gain = ctx.createGain();
-  // 20ms 페이드 — 잘린 자리에서 딱 소리가 나지 않게. 그 사이는 손대지 않는다.
-  gain.gain.setValueAtTime(0, startTime);
-  gain.gain.linearRampToValueAtTime(1, startTime + 0.02);
-  gain.gain.setValueAtTime(1, startTime + sec - 0.02);
-  gain.gain.linearRampToValueAtTime(0, startTime + sec);
-  gain.connect(master);
+  gain.gain.setValueAtTime(0, when);
+  gain.gain.linearRampToValueAtTime(1, when + fade);
+  gain.gain.setValueAtTime(1, when + dur - fade);
+  gain.gain.linearRampToValueAtTime(0, when + dur);
+  gain.connect(dest);
 
   const src = ctx.createBufferSource();
-  src.buffer = audioBuffer;
+  src.buffer = buffer;
   src.connect(gain);
-  src.start(startTime, from, sec);
+  src.start(when, from, dur);
+}
 
-  const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, 0.16);
+// 챈트: 목소리를 자르지 않고 멜로디를 아래에 깐다.
+//
+// 음절을 늘리거나 잘라 박자에 맞추면 (1) 조각 사이 이음새가 사라지고 (2) 음보다
+// 짧은 음절 뒤에 침묵이 들어가 말이 끊긴다. 그래서 두 방식만 둔다:
+//   align=true(기본)  음절 시작만 박에 맞추고 뒤의 쉼으로 흡수한다 — 음절은 온전
+//   align=false        녹음을 통째로 흘려보낸다 — 박에 안 맞는 대신 완전히 자연스럽다
+function buildChantGraph(ctx, { audioBuffer, bounds, melody, align = true }, startTime) {
+  const { from, sec } = voiceSpan(audioBuffer, bounds);
+  const sr = audioBuffer.sampleRate;
+  const { melodyLevel, master: masterGain } = mixLevels(
+    audioBuffer.getChannelData(0),
+    Math.round(from * sr),
+    Math.round(sec * sr),
+  );
+
+  const master = ctx.createGain();
+  master.gain.value = masterGain;
+  master.connect(ctx.destination);
+
+  let voiceSec = sec;
+  if (align && bounds.length) {
+    const { placed, totalSec } = alignToBeats(bounds, sr, 60 / melody.bpm);
+    for (const chunk of placed) {
+      scheduleVoiceChunk(ctx, master, audioBuffer, startTime + chunk.at, chunk.from, chunk.dur);
+    }
+    voiceSec = totalSec;
+  } else {
+    scheduleVoiceChunk(ctx, master, audioBuffer, startTime, from, sec);
+  }
+
+  const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, melodyLevel);
   return {
-    durationSec: Math.max(sec, endTime - startTime) + TAIL_SEC,
+    durationSec: Math.max(voiceSec, endTime - startTime) + TAIL_SEC,
     master,
     noteTimes,
   };
@@ -255,11 +349,22 @@ export function progressAt(noteTimes, t) {
 // 곡 전체를 버퍼로 렌더한다. 재생도 저장도 이 결과를 쓴다 — 들리는 소리와
 // 내려받는 파일이 같은 바이트여야 하고, 경로가 갈라지면 한쪽만 고쳐진다.
 // noteTimes를 함께 돌려주는 이유: 화면이 박자를 다시 계산하면 소리와 어긋난다.
+// 곡 길이. 버퍼 할당(여기)과 그래프(buildChantGraph)가 같은 값을 봐야 하므로
+// 목소리 길이 계산을 두 곳에 적지 않는다.
+export function songSeconds(spec) {
+  const beatSec = 60 / spec.melody.bpm;
+  const melodySec = spec.melody.notes.reduce((sum, n) => sum + n.beats, 0) * beatSec;
+  if (!spec.chant) return melodySec;
+  const voiceSec =
+    spec.align !== false && spec.bounds && spec.bounds.length
+      ? alignToBeats(spec.bounds, spec.audioBuffer.sampleRate, beatSec).totalSec
+      : voiceSpan(spec.audioBuffer, spec.bounds).sec;
+  return Math.max(voiceSec, melodySec);
+}
+
 export async function renderOffline(spec) {
   const sampleRate = spec.audioBuffer.sampleRate;
-  const melodySec = spec.melody.notes.reduce((sum, n) => sum + n.beats, 0) * (60 / spec.melody.bpm);
-  // 챈트는 목소리를 자르지 않으므로 목소리와 멜로디 중 긴 쪽이 곡 길이다
-  const songSec = spec.chant ? Math.max(voiceSpan(spec.audioBuffer, spec.bounds).sec, melodySec) : melodySec;
+  const songSec = songSeconds(spec);
   const ctx = new OfflineAudioContext(2, Math.ceil((songSec + TAIL_SEC) * sampleRate), sampleRate);
   const { noteTimes, durationSec } = buildGraph(ctx, spec);
   const buffer = await ctx.startRendering();

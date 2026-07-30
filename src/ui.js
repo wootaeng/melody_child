@@ -2,7 +2,7 @@ import { sliceSyllables } from './slicer.js';
 import { findGrain } from './pitch.js';
 import { findPitchMarks } from './psola.js';
 import { composeMelody, VERSE_LEN } from './composer.js';
-import { renderOffline, progressAt, renderVoices, voiceSpan } from './synth.js';
+import { renderOffline, progressAt, renderVoices, voiceSpan, alignToBeats, mixLevels } from './synth.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
 import { makeDevSample } from './devsample.js';
@@ -17,6 +17,9 @@ const urlParams = new URLSearchParams(location.search);
 const mode = urlParams.get('mode') || 'full';
 const withPad = urlParams.has('pad');
 const debugMode = urlParams.has('debug');
+// 챈트에서 음절 시작을 박에 맞출지. 기본은 맞춘다(박에 안 맞는 게 거슬린다는
+// 실기 지적) — `?align=0`이면 녹음을 통째로 흘려보내는 이전 방식이다.
+const aligned = urlParams.get('align') !== '0';
 
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
@@ -199,14 +202,17 @@ function refreshMelody() {
   const degrees = mode === 'narrow' ? NARROW_DEGREES : undefined;
   const chant = mode === 'chant';
 
-  // 챈트는 목소리를 자르지 않으므로 음 개수가 음절 수에 묶이지 않는다 — 녹음
-      // 길이를 덮을 만큼 만든다. 박 길이를 알려면 bpm이 필요하고 bpm은 시드에서만
-  // 나오므로 한 음짜리로 한 번 떠본다(같은 시드면 같은 bpm이다).
+  // 챈트는 목소리를 음절 단위로 다시 배치하지 않으므로 음 개수가 음절 수에
+  // 묶이지 않는다 — 목소리 길이를 덮을 만큼 만든다. 박 길이를 알려면 bpm이
+  // 필요하고 bpm은 시드에서만 나오므로 한 음짜리로 한 번 떠본다(같은 시드면 같은 bpm).
   let noteCount = session.segments.length;
   if (chant) {
-    const bpm = composeMelody(1, seed, session.referenceHz, { degrees }).bpm;
-    const voiceSec = voiceSpan(session.audioBuffer, session.bounds).sec;
-    noteCount = Math.max(VERSE_LEN, Math.ceil(voiceSec / (60 / bpm)));
+    const beatSec = 60 / composeMelody(1, seed, session.referenceHz, { degrees }).bpm;
+    // 정렬하면 쉼이 박 단위로 올림되어 목소리가 길어진다 — 렌더와 같은 함수로 잰다
+    const voiceSec = aligned
+      ? alignToBeats(session.bounds, session.audioBuffer.sampleRate, beatSec).totalSec
+      : voiceSpan(session.audioBuffer, session.bounds).sec;
+    noteCount = Math.max(VERSE_LEN, Math.ceil(voiceSec / beatSec));
   }
 
   session.melody = composeMelody(noteCount, seed, session.referenceHz, { degrees });
@@ -219,9 +225,9 @@ function refreshMelody() {
 // 렌더에 넘길 재료. 모드에 따라 목소리를 손대는 정도만 달라진다 —
 // 박자·구슬·저장은 전부 같은 경로를 탄다.
 function renderSpec() {
-  // 챈트는 목소리를 통째로 흘려보내고 멜로디를 아래에 깐다(chant 플래그).
-  // 나머지 모드는 음절을 음정으로 옮겨 배치하고, 멜로디 반주는 선택이다.
-  return { ...session, chant: mode === 'chant', pad: withPad };
+  // 챈트는 목소리를 자르지 않고 멜로디를 아래에 깐다(chant). align이면 음절 시작만
+  // 박에 맞춘다. 나머지 모드는 음절을 음정으로 옮겨 배치하고 반주는 선택이다.
+  return { ...session, chant: mode === 'chant', align: aligned, pad: withPad };
 }
 
 function analyze(audioBuffer, transcript) {
@@ -365,8 +371,24 @@ function diagnostics() {
     `midi ${Math.min(...midis)}~${Math.max(...midis)}`,
   ];
   if (!session.voices) {
-    // 챈트는 목소리를 손대지 않으므로 통째로 흘려보내는 길이가 곧 진단값이다
-    facts.push(`목소리 ${voiceSpan(session.audioBuffer, session.bounds).sec.toFixed(1)}초 통째로`);
+    // 챈트 진단: 목소리 길이와 멜로디 음량(목소리 RMS에서 나온다)
+    const span = voiceSpan(session.audioBuffer, session.bounds);
+    const { melodyLevel } = mixLevels(
+      session.audioBuffer.getChannelData(0),
+      Math.round(span.from * sr),
+      Math.round(span.sec * sr),
+    );
+    facts.push(`목소리 ${span.sec.toFixed(1)}초`, `멜로디 ${melodyLevel.toFixed(2)}`);
+    if (aligned && session.bounds.length) {
+      const { totalSec, gridSec } = alignToBeats(
+        session.bounds,
+        sr,
+        60 / session.melody.bpm,
+      );
+      facts.push(`격자 ${Math.round(gridSec * 1000)}ms`, `정렬 ${totalSec.toFixed(1)}초`);
+    } else {
+      facts.push('통째로');
+    }
     return facts;
   }
   const spans = session.pitchMarks.map((pm) => (pm ? pm.marks[pm.marks.length - 1] - pm.marks[0] : 0));
