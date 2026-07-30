@@ -116,26 +116,31 @@ function scheduleSegment(ctx, dest, buffer, seg, grain, voice, targetHz, when, n
 // 민감한 1~3kHz 대역이 비기 때문**이다(실기 지적: "멜로디가 여전히 작다"). 배음을
 // 얹으면 진폭을 키우지 않고도 지각 음량이 올라간다. createPeriodicWave가 피크를
 // 정규화하므로 클리핑 계산(mixLevels)도 그대로 유효하다.
-const MELODY_HARMONICS = [0, 1, 0.45, 0.22, 0.1];
+// 실기 청취로 한 단계 더 올렸다(2·3배음 0.45·0.22 → 0.75·0.55, 5·6배음 추가).
+// tone으로 기본음 위 배음만 한꺼번에 조절한다 — 0이면 순수 사인파다.
+const MELODY_HARMONICS = [0, 1, 0.75, 0.55, 0.38, 0.24, 0.14];
 
-function melodyWave(ctx) {
-  const real = new Float32Array(MELODY_HARMONICS.length);
-  return ctx.createPeriodicWave(real, Float32Array.from(MELODY_HARMONICS));
+function melodyWave(ctx, tone = 1) {
+  const imag = Float32Array.from(MELODY_HARMONICS, (amp, i) =>
+    i <= 1 ? amp : Math.min(1, amp * tone),
+  );
+  return ctx.createPeriodicWave(new Float32Array(imag.length), imag);
 }
 
 // 멜로디를 악기로 연주한다. 저역 삼각파 패드가 화자 음높이가 낮을 때 웅웅거려
 // 사용자가 "비프음"으로 들었으므로 저역통과로 거친 배음을 깎아 순하게 남긴다.
 //
 // 음 시각을 돌려주는 쪽이 이 함수다 — 화면 구슬이 이 시각을 그대로 쓴다.
-function scheduleMelody(ctx, dest, melody, startTime, level) {
+function scheduleMelody(ctx, dest, melody, startTime, level, tone) {
   const secPerBeat = 60 / melody.bpm;
   const lowpass = ctx.createBiquadFilter();
   lowpass.type = 'lowpass';
-  // 1400Hz로 막으면 배음이 통째로 잘려 다시 사인파가 된다 — 3kHz까지 열어 둔다.
-  lowpass.frequency.value = 3000;
+  // 1400Hz로 막으면 배음이 통째로 잘려 다시 사인파가 된다. 3.5kHz까지 열어 두되
+  // 그 위는 깎는다 — 거친 고역이 남으면 예전의 "비프음" 인상으로 돌아간다.
+  lowpass.frequency.value = 3500;
   lowpass.connect(dest);
 
-  const wave = melodyWave(ctx);
+  const wave = melodyWave(ctx, tone);
   const noteTimes = [];
   let when = startTime;
   for (const note of melody.notes) {
@@ -294,7 +299,11 @@ function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur, level) {
 // 짧은 음절 뒤에 침묵이 들어가 말이 끊긴다. 그래서 두 방식만 둔다:
 //   align=true(기본)  음절 시작만 박에 맞추고 뒤의 쉼으로 흡수한다 — 음절은 온전
 //   align=false        녹음을 통째로 흘려보낸다 — 박에 안 맞는 대신 완전히 자연스럽다
-function buildChantGraph(ctx, { audioBuffer, bounds, melody, align = true, melodyRatio }, startTime) {
+function buildChantGraph(
+  ctx,
+  { audioBuffer, bounds, melody, align = true, melodyRatio, melodyTone },
+  startTime,
+) {
   const { from, sec } = voiceSpan(audioBuffer, bounds);
   const sr = audioBuffer.sampleRate;
   const { voiceGain, melodyLevel, master: masterGain } = mixLevels(
@@ -319,7 +328,7 @@ function buildChantGraph(ctx, { audioBuffer, bounds, melody, align = true, melod
     scheduleVoiceChunk(ctx, master, audioBuffer, startTime, from, sec, voiceGain);
   }
 
-  const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, melodyLevel);
+  const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, melodyLevel, melodyTone);
   return {
     durationSec: Math.max(voiceSec, endTime - startTime) + TAIL_SEC,
     master,
@@ -347,7 +356,7 @@ export function buildGraph(ctx, spec, startTime = 0) {
   master.gain.value = 0.9;
   master.connect(ctx.destination);
 
-  if (pad) scheduleMelody(ctx, master, melody, startTime, 0.1);
+  if (pad) scheduleMelody(ctx, master, melody, startTime, 0.1, spec.melodyTone);
 
   // 각 음이 언제 울리는지 함께 돌려준다. 화면에서 음절 구슬을 소리에 맞춰 켜려면
   // 이 시각이 필요하고, UI가 따로 계산하면 타이밍 로직이 두 곳으로 갈라진다.

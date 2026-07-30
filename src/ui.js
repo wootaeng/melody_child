@@ -22,6 +22,11 @@ const debugMode = urlParams.has('debug');
 const aligned = urlParams.get('align') !== '0';
 // 멜로디 음량 비율(정규화한 목소리 RMS 대비). 귀로 맞추는 값이라 URL로 뺐다.
 const melodyRatio = Number(urlParams.get('mel')) > 0 ? Number(urlParams.get('mel')) : undefined;
+// 배음 세기(기본 1, 0이면 순수 사인파). 밝을수록 같은 진폭에서 더 크게 들린다.
+// 존재 확인이 먼저다 — Number(null)은 0이라 파라미터가 없을 때 사인파로 떨어진다.
+const melodyTone = urlParams.has('tone') && Number(urlParams.get('tone')) >= 0
+  ? Number(urlParams.get('tone'))
+  : undefined;
 
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
@@ -229,7 +234,7 @@ function refreshMelody() {
 function renderSpec() {
   // 챈트는 목소리를 자르지 않고 멜로디를 아래에 깐다(chant). align이면 음절 시작만
   // 박에 맞춘다. 나머지 모드는 음절을 음정으로 옮겨 배치하고 반주는 선택이다.
-  return { ...session, chant: mode === 'chant', align: aligned, pad: withPad, melodyRatio };
+  return { ...session, chant: mode === 'chant', align: aligned, pad: withPad, melodyRatio, melodyTone };
 }
 
 function analyze(audioBuffer, transcript) {
