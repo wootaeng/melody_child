@@ -6,15 +6,17 @@ import { renderOffline, progressAt, renderVoices, voiceSpan, alignToBeats, mixLe
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
 import { makeDevSample } from './devsample.js';
+import { INSTRUMENTS, DEFAULT_INSTRUMENT, pickInstrument } from './instruments.js';
 
 const MIN_NOTES = VERSE_LEN; // 최소 한 절
 const NARROW_DEGREES = [0, 2, 4]; // 도·레·미 — 옮기는 폭이 4반음 안에 머문다
 
 // URL 손잡이. 음정을 옮기는 폭이 곧 목소리 왜곡의 양이라, 실기에서 귀로 비교할
-// 수 있게 밖으로 뺐다. mode=chant(음정 안 옮김·박자만) / narrow(도레미) / 기본(5음계),
+// 수 있게 밖으로 뺐다. 기본은 chant(목소리를 자르지 않고 멜로디를 아래에 깐다) —
+// 실기 판정으로 이 방향이 정해졌다. mode=full(음절을 음정으로 옮김) / narrow(도레미),
 // pad=1(반주 아르페지오), debug=1(진단 숫자 — 폰에서는 콘솔을 볼 수 없다).
 const urlParams = new URLSearchParams(location.search);
-const mode = urlParams.get('mode') || 'full';
+const mode = urlParams.get('mode') || 'chant';
 const withPad = urlParams.has('pad');
 const debugMode = urlParams.has('debug');
 // 챈트에서 음절 시작을 박에 맞출지. 기본은 맞춘다(박에 안 맞는 게 거슬린다는
@@ -27,6 +29,9 @@ const melodyRatio = Number(urlParams.get('mel')) > 0 ? Number(urlParams.get('mel
 const melodyTone = urlParams.has('tone') && Number(urlParams.get('tone')) >= 0
   ? Number(urlParams.get('tone'))
   : undefined;
+// 멜로디 악기. URL로 기본값을 정하고 화면 버튼으로 바꾼다 — 아이폰에서 주소를
+// 고치지 않고 A/B할 수 있어야 실기 청취가 굴러간다.
+let instrument = INSTRUMENTS[urlParams.get('inst')] ? urlParams.get('inst') : DEFAULT_INSTRUMENT;
 
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
@@ -234,7 +239,15 @@ function refreshMelody() {
 function renderSpec() {
   // 챈트는 목소리를 자르지 않고 멜로디를 아래에 깐다(chant). align이면 음절 시작만
   // 박에 맞춘다. 나머지 모드는 음절을 음정으로 옮겨 배치하고 반주는 선택이다.
-  return { ...session, chant: mode === 'chant', align: aligned, pad: withPad, melodyRatio, melodyTone };
+  return {
+    ...session,
+    chant: mode === 'chant',
+    align: aligned,
+    pad: withPad,
+    melodyRatio,
+    melodyTone,
+    instrument,
+  };
 }
 
 function analyze(audioBuffer, transcript) {
@@ -371,12 +384,20 @@ async function save() {
 function diagnostics() {
   const sr = session.audioBuffer.sampleRate;
   const midis = session.melody.notes.map((n) => n.midi);
+  const lo = Math.min(...midis);
+  const hi = Math.max(...midis);
+  const preset = pickInstrument(instrument);
   const facts = [
     `mode ${mode}${withPad ? '+pad' : ''}`,
+    `악기 ${instrument}`,
     `기준 ${Math.round(session.referenceHz || 0)}Hz`,
     `${session.melody.bpm}bpm`,
-    `midi ${Math.min(...midis)}~${Math.max(...midis)}`,
+    `midi ${lo}~${hi}`,
   ];
+  // 프리셋이 음역을 옮기면 실제로 울리는 음이 작곡값과 다르다. 실기 8차에서 midi
+  // 51~55(155~196Hz)가 목소리 기본음과 겹쳐 묻힌 것이 "멜로디가 작다"의 원인이었으니,
+  // 폰에서 어느 음역을 듣고 있는지 읽을 수 있어야 한다.
+  if (preset.octave > 0) facts.push(`울림 ${lo + preset.octave * 12}~${hi + preset.octave * 12}`);
   if (!session.voices) {
     // 챈트 진단: 목소리 길이와 멜로디 음량(목소리 RMS에서 나온다)
     const span = voiceSpan(session.audioBuffer, session.bounds);
@@ -415,11 +436,9 @@ function diagnostics() {
   return facts;
 }
 
-function showResult() {
-  el('lyrics').textContent = session.transcript;
-  el('lyrics').hidden = !session.transcript;
-
-  // 칩은 사실만 담는다 — 절 수와 음절 수는 아이가 화면에서 확인할 수 있는 정보다
+// 칩은 사실만 담는다 — 절 수와 음절 수는 아이가 화면에서 확인할 수 있는 정보다.
+// 악기를 바꿀 때도 다시 그린다(진단 칩의 악기·울림 음역이 따라와야 한다).
+function renderChips() {
   const facts = [`${session.melody.verseCount}절`, `${session.segments.length}음절`];
   if (session.rawCount < MIN_NOTES) facts.push('짧아서 반복했어요');
   if (debugMode) facts.push(...diagnostics());
@@ -430,11 +449,51 @@ function showResult() {
       return li;
     }),
   );
+}
+
+function showResult() {
+  el('lyrics').textContent = session.transcript;
+  el('lyrics').hidden = !session.transcript;
+  renderChips();
 
   // 캔버스는 CSS 폭을 재서 그리므로 화면을 먼저 띄운 뒤에 그린다
   show('result');
   drawBeads(session.melody, -1);
   drawWaveform(session.audioBuffer.getChannelData(0), session.bounds);
+}
+
+// 악기 버튼은 프리셋 테이블에서 만든다 — 악기를 추가하면 화면에 자동으로 나타나고
+// 이름을 HTML과 JS 두 곳에 적지 않는다.
+function buildInstrumentPicker() {
+  el('instruments').append(
+    ...Object.entries(INSTRUMENTS).map(([name, preset]) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = preset.label;
+      button.dataset.inst = name;
+      button.addEventListener('click', guarded(() => selectInstrument(name), '악기를 바꾸지 못했어요.'));
+      return button;
+    }),
+  );
+  syncInstrumentPicker();
+}
+
+function syncInstrumentPicker() {
+  for (const button of el('instruments').querySelectorAll('button')) {
+    button.setAttribute('aria-pressed', String(button.dataset.inst === instrument));
+  }
+}
+
+// 악기만 바꾸고 **멜로디는 그대로 둔다** — refreshMelody를 부르면 곡이 새로 작곡돼
+// 같은 곡으로 악기를 비교할 수 없다. 버릴 것은 렌더 결과(WAV)뿐이다.
+async function selectInstrument(name) {
+  if (name !== instrument) {
+    instrument = name;
+    syncInstrumentPicker();
+    dropSong();
+    if (session) renderChips();
+  }
+  if (session) await play();
 }
 
 async function startSession() {
@@ -531,6 +590,8 @@ function guarded(action, message) {
     }
   };
 }
+
+buildInstrumentPicker();
 
 el('start').addEventListener('click', startSession);
 el('stop').addEventListener('click', finishSession);

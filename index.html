@@ -144,6 +144,31 @@
   }
   #waveform { display: block; width: 100%; height: 56px; border-radius: 0.5rem; }
 
+  /* 악기 선택. 선택 표시에 코랄(--voice)을 쓰지 않는다 — 화면에서 가장 뜨거운 색은
+     아이 목소리여야 한다는 규칙을 지켜, 여기는 청록 잉크로 채운다. */
+  .picker { border: 0; margin: 1.1rem 0 0; padding: 0; }
+  .picker legend {
+    padding: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    color: var(--ink-soft);
+    margin-bottom: 0.45rem;
+  }
+  .picker button {
+    font-size: 0.85rem;
+    padding: 0.45rem 0.85rem;
+    margin: 0 0.35rem 0.35rem 0;
+    background: var(--card);
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1.5px var(--rule);
+  }
+  .picker button[aria-pressed='true'] {
+    background: var(--ink);
+    color: var(--card);
+    box-shadow: none;
+  }
+
   #notice, #stt-warning { margin: 0.9rem 0 0; color: #9c4a1c; font-size: 0.95rem; }
   #notice:empty { display: none; }
 
@@ -182,6 +207,10 @@
         <figcaption>내 목소리</figcaption>
         <canvas id="waveform" width="640" height="112"></canvas>
       </figure>
+      <!-- 버튼은 ui.js가 INSTRUMENTS로 만든다 — 악기 이름을 두 곳에 적지 않는다 -->
+      <fieldset id="instruments" class="picker">
+        <legend>멜로디 악기</legend>
+      </fieldset>
       <div class="actions">
         <button id="replay">다시 듣기</button>
         <button id="remix" class="ghost">새 멜로디</button>
