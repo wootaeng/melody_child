@@ -222,7 +222,11 @@ export function voiceSpan(audioBuffer, bounds) {
 // 격자가 625ms까지 올라간 것이 관측됐다 — 쉼이 중앙값을 끌어올리기 때문이다
 // (실제 녹음은 음절 사이에 무음이 없어 슬라이서가 어절 덩이를 잡고, 그 간격에 쉼이 섞인다).
 const GRID_MIN_SEC = 0.12;
-const GRID_MAX_SEC = 0.4;
+// 상한을 400 → 200ms로 내렸다. 격자가 굵으면 `ceil(음절/격자)` 하한이 한 칸을 크게
+// 넘겨 그 차이가 전부 침묵이 된다 — 실측에서 침묵의 최대 공급원이었다(무음 없이 이어
+// 말한 녹음 @108bpm: 조각마다 256ms, 1.45초 발화가 2.22초로). 격자를 잘게 하면
+// 초과분도 작아진다: 평균 침묵 189 → 23ms.
+const GRID_MAX_SEC = 0.2;
 const DIVISIONS = [1, 2, 4, 8];
 // 배정 칸 수를 정할 때의 반올림 편향. 0.5면 보통 반올림이고, 낮출수록 내림이 잦아져
 // 삽입 침묵이 줄고 쉼이 짧아진다. 실기에서 "말이 살짝 끊긴다"의 원인이 그 침묵이라
@@ -233,6 +237,24 @@ const DIVISIONS = [1, 2, 4, 8];
 // 같아지는 일이 실제 녹음에서 없기 때문이다 — 이음매는 아래 크로스페이드가 담당하고
 // 이 값은 침묵 총량만 담당한다. 두 관심사가 섞여 있던 것이 9차의 버그였다.
 const GRID_ROUND_BIAS = 0.25;
+
+// 음절 끝을 이만큼까지는 잘라도 좋다고 본다.
+//
+// 9차까지의 원칙은 "음절 불가침"이었고 `units`의 하한 `ceil(음절/격자)`가 그것을
+// 지켰다. 그런데 **그 하한이 곧 침묵의 최대 공급원**이었다: 음절이 격자보다 8%만 길어도
+// 두 칸을 먹고 재료가 없는 나머지가 전부 무음이 된다(실측 최대 256ms). 실기 판정이
+// "여전히 말이 뚝뚝 끊긴다"였고 그 뚝뚝이 이것이다.
+//
+// 잘리는 곳은 음절 **끝의 감쇠부**이고 뒤 조각과 크로스페이드로 이어진다. 50ms 감쇠부가
+// 사라지는 것과 256ms 무음이 들어가는 것 중에서는 앞쪽이 낫다고 보고 원칙을 바꿨다.
+// 실측: 이 허용치와 격자 상한을 함께 두면 최대 침묵 256 → 33ms, 잘린 음절은 15개 배치
+// 중 7개(최대 50ms).
+//
+// URL 손잡이로 빼지 않았다 — `alignToBeats`를 부르는 네 곳(buildChantGraph·songSeconds·
+// ui.js 두 곳)에 같은 값을 넘겨야 하고, 그 제약은 이미 totalSec 하나로 충분히 무겁다.
+// 실기 비교군으로는 `?align=0`(정렬 자체를 끔 → 침묵도 잘림도 0)이 더 확실하고,
+// trimSec 인자는 테스트가 예전 원칙(0)을 검증하는 데 쓴다.
+const SYLLABLE_TRIM_MAX = 0.08;
 
 // 조각 이음매 크로스페이드 길이.
 //
@@ -290,7 +312,14 @@ function pickGrid(spans, beatSec) {
   return grid === null ? Math.min(GRID_MAX_SEC, Math.max(GRID_MIN_SEC, beatSec)) : grid;
 }
 
-export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25, fadeSec = XFADE_SEC) {
+export function alignToBeats(
+  bounds,
+  sampleRate,
+  beatSec,
+  tailSec = 0.25,
+  fadeSec = XFADE_SEC,
+  trimSec = SYLLABLE_TRIM_MAX,
+) {
   const onsets = bounds.map((seg) => seg.start / sampleRate);
   // 이 음절이 쓸 수 있는 재료 = 다음 음절 시작까지(사이의 숨·이음새 포함)
   const spans = bounds.map(
@@ -302,15 +331,18 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25, fadeSe
   let at = 0;
   for (const [i, seg] of bounds.entries()) {
     const syllableSec = (seg.end - seg.start) / sampleRate;
-    // 자연 간격을 격자에 맞추되 **내림으로 편향**하고, 음절이 잘리지 않을 만큼은
-    // 반드시 준다. 편향의 이유: 배정 칸이 재료보다 길면 그 차이가 침묵이 되고
-    // (실기에서 7.3초가 7.8초로 늘어난 0.5초가 그것이다), 짧으면 음절 뒤의 쉼만
-    // 건너뛴다. 둘은 같은 반올림 오차의 두 방향이라 총량은 보존되므로 어디로
-    // 보낼지만 고를 수 있고, 소리가 사라지는 쪽보다 쉼이 짧아지는 쪽이 낫다.
+    // 자연 간격을 격자에 맞추되 **내림으로 편향**한다. 배정 칸이 재료보다 길면 그
+    // 차이가 침묵이 되고(실기에서 7.3초가 7.8초로 늘어난 0.5초가 그것이다), 짧으면
+    // 음절 뒤의 쉼만 건너뛴다. 둘은 같은 반올림 오차의 두 방향이라 총량은 보존되므로
+    // 어디로 보낼지만 고를 수 있고, 소리가 사라지는 쪽보다 쉼이 짧아지는 쪽이 낫다.
+    //
+    // 음절 하한에서 trimSec을 뺀다 — 이 하한이 곧 침묵의 최대 공급원이었다
+    // (SYLLABLE_TRIM_MAX 주석에 근거가 있다). 음절 끝 trimSec까지는 잘려도 좋다고 보고,
+    // 그 덕에 두 칸을 먹던 조각이 한 칸에 들어와 침묵이 사라진다.
     const units = Math.max(
       1,
       Math.floor(spans[i] / gridSec + GRID_ROUND_BIAS),
-      Math.ceil(syllableSec / gridSec),
+      Math.ceil(Math.max(0, syllableSec - trimSec) / gridSec),
     );
     const allotted = units * gridSec;
     const dur = Math.min(spans[i], allotted);
@@ -345,14 +377,16 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25, fadeSe
 const VOICE_PEAK = 0.89; // 정규화 목표 피크
 const VOICE_GAIN_MAX = 8; // 무음·잡음만 있는 녹음을 증폭하지 않기 위한 상한
 // 정규화된 목소리 RMS 대비 멜로디 진폭. 실기 청취로 정했다(1 → 작다, 2.2 → 여전히
-// 작다, 3 → 적당). 배음을 얹어 지각 음량이 함께 올랐으므로 이 숫자만의 결과는 아니다.
+// 작다, 3 → 적당, 9차에서 3 → "조금 줄였으면"). 배음을 얹어 지각 음량이 함께 올랐으므로
+// 이 숫자만의 결과는 아니다. 화면 버튼으로 조절하므로(ui.js의 MELODY_LEVELS) 이 값은
+// 그 중 "보통" 단계이자 손잡이가 없을 때의 기본이다.
 //
 // **단위 주의**: 이 값은 RMS 비가 아니라 **엔벨로프 피크 비**다. 실효 RMS로 환산하는
 // 계수는 피아노에서 0.396이다(정규화 파형 RMS 0.519 × level 1.2 × 엔벨로프·필터 0.635 —
 // 한 음 오프라인 렌더 실측). 즉 실효 음량을 정하는 세 번째 자리가 `createMelodyVoice`의
 // 엔벨로프·필터인데 거기엔 "level"이라는 이름이 없어 레벨 결정으로 세어지지 않는다.
 // 이 주석이 없어서 9차 진단이 +5.4dB로 출발했다(실제 +1.5dB).
-const MELODY_TO_VOICE = 3;
+export const MELODY_TO_VOICE = 2.4;
 
 // biquad 저역통과(Q=1)가 차단 부근 성분을 키우는 몫. 프리셋 level과 곱해 클리핑 여유에
 // 들어간다.

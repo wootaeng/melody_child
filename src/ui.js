@@ -2,7 +2,9 @@ import { sliceSyllables } from './slicer.js';
 import { findGrain } from './pitch.js';
 import { findPitchMarks } from './psola.js';
 import { composeMelody, VERSE_LEN } from './composer.js';
-import { renderOffline, progressAt, renderVoices, voiceSpan, alignToBeats, mixLevels } from './synth.js';
+import {
+  renderOffline, progressAt, renderVoices, voiceSpan, alignToBeats, mixLevels, MELODY_TO_VOICE,
+} from './synth.js';
 import { ridePlan } from './leveler.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
@@ -23,8 +25,10 @@ const debugMode = urlParams.has('debug');
 // 챈트에서 음절 시작을 박에 맞출지. 기본은 맞춘다(박에 안 맞는 게 거슬린다는
 // 실기 지적) — `?align=0`이면 녹음을 통째로 흘려보내는 이전 방식이다.
 const aligned = urlParams.get('align') !== '0';
-// 멜로디 음량 비율(정규화한 목소리 RMS 대비). 귀로 맞추는 값이라 URL로 뺐다.
-const melodyRatio = Number(urlParams.get('mel')) > 0 ? Number(urlParams.get('mel')) : undefined;
+// 멜로디 음량 비율(정규화한 목소리 RMS 대비). 화면 버튼으로 바꾸고 URL로 기본값을
+// 정한다 — 악기와 같은 방식이다. 초기값을 synth의 기본과 같게 두면 버튼 선택 표시가
+// 실제로 울리는 음량과 항상 일치한다.
+let melodyRatio = Number(urlParams.get('mel')) > 0 ? Number(urlParams.get('mel')) : MELODY_TO_VOICE;
 // 배음 세기(기본 1, 0이면 순수 사인파). 밝을수록 같은 진폭에서 더 크게 들린다.
 // 존재 확인이 먼저다 — Number(null)은 0이라 파라미터가 없을 때 사인파로 떨어진다.
 const melodyTone = urlParams.has('tone') && Number(urlParams.get('tone')) >= 0
@@ -489,6 +493,53 @@ function showResult() {
   drawWaveform(session.audioBuffer.getChannelData(0), session.bounds);
 }
 
+// 멜로디 음량 단계. 실기에서 "지금보다 조금 줄이거나 조절 버튼이 있으면 좋겠다"는
+// 판정을 받아 넣었다 — 목소리와의 균형은 녹음마다 다르게 들리므로 **아이가 화면에서
+// 바로 고치는 것**이 URL 손잡이(?mel=)보다 실용적이다. `보통`이 synth의 기본값이라
+// 값을 두 곳에 적지 않는다.
+const MELODY_LEVELS = [
+  { label: '아주 작게', ratio: 1.2 },
+  { label: '작게', ratio: 1.8 },
+  { label: '보통', ratio: MELODY_TO_VOICE },
+  { label: '크게', ratio: 3.2 },
+];
+
+// 음량 버튼도 악기와 같은 규칙이다: **곡은 그대로 두고 렌더 결과만 버린다.**
+function buildMelodyLevelPicker() {
+  el('melody-levels').append(
+    ...MELODY_LEVELS.map(({ label, ratio }) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.dataset.ratio = String(ratio);
+      button.addEventListener(
+        'click',
+        guarded(() => selectMelodyLevel(ratio), '멜로디 음량을 바꾸지 못했어요.'),
+      );
+      return button;
+    }),
+  );
+  syncMelodyLevelPicker();
+}
+
+function syncMelodyLevelPicker() {
+  for (const button of el('melody-levels').querySelectorAll('button')) {
+    // ?mel=로 단계에 없는 값을 준 경우 아무 버튼도 눌리지 않는다 — 그 사실이 보이는 게
+    // 맞다(임의의 버튼을 눌린 것으로 표시하면 화면이 거짓말을 한다).
+    button.setAttribute('aria-pressed', String(Number(button.dataset.ratio) === melodyRatio));
+  }
+}
+
+async function selectMelodyLevel(ratio) {
+  if (ratio !== melodyRatio) {
+    melodyRatio = ratio;
+    syncMelodyLevelPicker();
+    dropSong();
+    if (session) renderChips();
+  }
+  if (session) await play();
+}
+
 // 악기 버튼은 프리셋 테이블에서 만든다 — 악기를 추가하면 화면에 자동으로 나타나고
 // 이름을 HTML과 JS 두 곳에 적지 않는다.
 function buildInstrumentPicker() {
@@ -619,6 +670,7 @@ function guarded(action, message) {
 }
 
 buildInstrumentPicker();
+buildMelodyLevelPicker();
 
 el('start').addEventListener('click', startSession);
 el('stop').addEventListener('click', finishSession);

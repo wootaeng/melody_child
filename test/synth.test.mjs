@@ -49,7 +49,10 @@ test('격자를 자연스러운 음절 간격에서 고른다 (박에 하나씩 
   }));
   const beatSec = 0.625;
   const { gridSec, totalSec } = alignToBeats(bounds, SR, beatSec);
-  assert.equal(+gridSec.toFixed(4), 0.3125, `격자 ${gridSec}`);
+  // 상한이 200ms이므로 후보는 16분음표(0.15625)다. 굵은 격자를 쓰면 `ceil(음절/격자)`
+  // 하한이 한 칸을 크게 넘겨 그 차이가 침묵이 된다 — 그게 "뚝뚝 끊긴다"의 원인이었다.
+  assert.equal(+gridSec.toFixed(5), 0.15625, `격자 ${gridSec}`);
+  assert.ok(gridSec <= 0.2 + 1e-9 && gridSec >= 0.12 - 1e-9, `격자가 상·하한을 벗어났다`);
   // 총 길이가 자연 발화(약 2.2초)에서 크게 벗어나지 않는다
   assert.ok(totalSec < 2.5, `${totalSec.toFixed(2)}초로 늘어났다`);
 });
@@ -67,19 +70,31 @@ test('빠르게 말한 곳은 붙어 있고 쉰 곳은 벌어진다 (원래 리�
   assert.ok(Math.abs(gap1 - 0.3) <= gridSec, `붙은 음절이 벌어졌다: ${gap1.toFixed(2)}`);
 });
 
-test('음절은 절대 잘리지 않는다 (재생 길이 ≥ 음절 길이)', () => {
-  const bounds = [
-    { start: at(0.0), end: at(0.45) }, // 박(0.5)보다 조금 짧다
-    { start: at(0.5), end: at(1.05) }, // 박보다 조금 길다 → 2박
-    { start: at(2.0), end: at(2.3) },
-  ];
-  const { placed } = alignToBeats(bounds, SR, 0.5);
-  for (const [i, chunk] of placed.entries()) {
-    assert.ok(
-      chunk.dur >= chunk.syllableSec - 1e-9,
-      `조각 ${i}: 재생 ${chunk.dur.toFixed(3)}초 < 음절 ${chunk.syllableSec.toFixed(3)}초`,
-    );
-  }
+test('음절은 끝 80ms까지만 잘린다 (그 이상은 침묵보다 나쁘다)', () => {
+  // 9차까지는 "절대 잘리지 않는다"였다. 그 원칙을 지키던 `ceil(음절/격자)` 하한이
+  // 정작 침묵의 최대 공급원이어서(실측 최대 256ms) 허용치를 뒀다 — 잘리는 곳은 음절
+  // 끝의 감쇠부이고 뒤 조각과 크로스페이드로 이어진다. 허용치를 넘으면 말이 뭉개지므로
+  // 상한은 지켜야 한다.
+  let worstMs = 0;
+  eachPlacement(({ placed }, label) => {
+    for (const [i, c] of placed.entries()) {
+      const cut = Math.max(0, c.syllableSec - c.dur);
+      assert.ok(
+        cut <= 0.08 + 1e-9,
+        `${label} 조각 ${i}: 음절이 ${(cut * 1000).toFixed(0)}ms 잘렸다 (허용 80ms)`,
+      );
+      worstMs = Math.max(worstMs, cut * 1000);
+    }
+  });
+  // 실제로 잘리고 있다는 것도 확인한다 — 0이면 허용치가 아무 일도 하지 않는다는 뜻이고,
+  // 그러면 침묵이 돌아왔을 것이다(둘은 같은 반올림 오차의 두 방향이다).
+  assert.ok(worstMs > 0, '아무 음절도 잘리지 않았다 — 허용치가 무동작이다');
+});
+
+test('trim=0이면 음절 불가침으로 되돌아간다 (실기 A/B)', () => {
+  eachPlacement(({ placed }) => {
+    for (const c of placed) assert.ok(c.dur >= c.syllableSec - 1e-9);
+  }, { trimSec: 0 });
 });
 
 test('조각이 서로 겹치지 않는다', () => {
@@ -174,10 +189,10 @@ const SENTENCE = [
 
 const FIXTURES = { PHRASES, SYL6, CONTIGUOUS, SENTENCE };
 const BPMS = [96, 108, 120];
-const eachPlacement = (fn) => {
+const eachPlacement = (fn, { trimSec } = {}) => {
   for (const bpm of BPMS) {
     for (const [name, bounds] of Object.entries(FIXTURES)) {
-      fn(alignToBeats(bounds, SR, 60 / bpm), `${name}@${bpm}bpm`, bounds);
+      fn(alignToBeats(bounds, SR, 60 / bpm, 0.25, undefined, trimSec), `${name}@${bpm}bpm`, bounds);
     }
   }
 };
@@ -224,17 +239,16 @@ test('출력이 이어지는 경계에서 게인 합이 1이다 (진폭이 0으�
   assert.ok(checked >= 20, `검사한 경계가 ${checked}개뿐이다 — 픽스처가 이음매를 만들지 못한다`);
 });
 
-test('뒤가 이어지는 조각은 페이드 아웃이 음절 위에 걸리지 않는다', () => {
+test('뒤가 이어지는 조각은 페이드 아웃이 재료 밖에서 시작한다', () => {
+  // 이쪽은 고원이 재료 끝(dur)까지 유지되고 페이드 아웃은 그 뒤에서 걸린다 — 즉 재생하는
+  // 재료 위에 램프가 얹히지 않는다. 음절이 허용치만큼 잘린 조각에서도 그 성질은 같다
+  // (잘린 것은 배정 단계이고 여기서 보는 것은 봉투다).
   eachPlacement(({ placed }, label) => {
     for (const [i, c] of placed.entries()) {
       if (!c.joinsNext) continue;
-      // 페이드 인은 온셋 위에 걸릴 수밖에 없다(from = 음절 시작) — 출력이 이어지는
-      // 경계에서는 앞 조각의 꼬리가 그걸 보상한다. 여기서 보는 것은 뒤쪽뿐이다.
-      assert.ok(
-        c.plateauSec >= c.syllableSec - 1e-9,
-        `${label} 조각 ${i}: 고원 끝 ${c.plateauSec.toFixed(3)}초 < 음절 ${c.syllableSec.toFixed(3)}초`,
-      );
-      assert.equal(gainAt(c, c.syllableSec), 1, `${label} 조각 ${i}: 음절이 끝나기 전에 게인이 내려간다`);
+      assert.equal(c.plateauSec, c.dur, `${label} 조각 ${i}: 고원이 재료 끝과 다르다`);
+      const heard = Math.min(c.syllableSec, c.dur); // 실제로 들리는 음절 부분
+      assert.equal(gainAt(c, heard), 1, `${label} 조각 ${i}: 들리는 음절 위에서 게인이 내려간다`);
     }
   });
 });
@@ -248,20 +262,18 @@ test('뒤에 침묵이 있는 조각은 페이드 아웃이 음절 뒤 쉼을 �
   eachPlacement(({ placed }, label) => {
     for (const [i, c] of placed.entries()) {
       if (c.joinsNext) continue;
-      const tailRoom = c.dur - c.syllableSec; // 재료 안에 남은 쉼
+      const tailRoom = c.dur - c.syllableSec; // 재료 안에 남은 쉼(음절이 잘렸으면 음수)
       const eaten = Math.max(0, c.syllableSec - c.plateauSec);
       assert.ok(
         Math.abs(eaten - Math.max(0, c.fadeSec - tailRoom)) < 1e-9,
         `${label} 조각 ${i}: 먹힌 양 ${eaten} ≠ 쉼 부족분 ${Math.max(0, c.fadeSec - tailRoom)}`,
       );
-      assert.ok(eaten <= c.fadeSec + 1e-9, `${label} 조각 ${i}: 페이드보다 많이 먹었다`);
       worstMs = Math.max(worstMs, eaten * 1000);
     }
   });
-  // 최악값을 드러내 둔다. 20ms(=XFADE_SEC)는 쉼이 전혀 없는 음절에서 페이드 전체가
-  // 꼬리에 걸린 경우이고 그것이 이 방식의 상한이다 — 이 값을 넘으면 페이드 길이 계산이
-  // 깨진 것이다. 상한이 거슬리면 손댈 곳은 XFADE_SEC 하나다.
-  assert.ok(worstMs <= 20 + 1e-6, `음절 꼬리가 최대 ${worstMs.toFixed(1)}ms 감쇠한다 (상한 20ms)`);
+  // 상한은 잘림 허용치(80) + 페이드(20)다. 앞쪽은 배정이 자른 몫이고 뒤쪽은 봉투가
+  // 먹은 몫이라 최악이 겹칠 수 있다 — 이 값을 넘으면 둘 중 하나의 계산이 깨진 것이다.
+  assert.ok(worstMs <= 100 + 1e-6, `음절 꼬리가 최대 ${worstMs.toFixed(1)}ms 감쇠한다 (상한 100ms)`);
 });
 
 test('보고하는 길이가 마지막 조각의 꼬리를 포함한다', () => {
