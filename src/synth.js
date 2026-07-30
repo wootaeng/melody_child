@@ -111,30 +111,46 @@ function scheduleSegment(ctx, dest, buffer, seg, grain, voice, targetHz, when, n
   body.stop(when + sounding);
 }
 
-// 멜로디를 악기로 연주한다. 사인파 + 저역통과에 으뜸음 위 옥타브 — 예전 저역
-// 삼각파 패드가 화자 음높이가 낮을 때 웅웅거려 사용자가 "비프음"으로 들었기
-// 때문에 위로 올리고 순한 파형을 쓴다. 목소리가 위에 얹히도록 작게 깐다.
+// 멜로디 악기의 배음 구성(기본음·2·3·4배음). 순수 사인파는 진폭이 같아도 말소리보다
+// 훨씬 작게 들린다 — 화자 음높이대(200~400Hz)에 에너지가 전부 몰려 있고 **귀가 가장
+// 민감한 1~3kHz 대역이 비기 때문**이다(실기 지적: "멜로디가 여전히 작다"). 배음을
+// 얹으면 진폭을 키우지 않고도 지각 음량이 올라간다. createPeriodicWave가 피크를
+// 정규화하므로 클리핑 계산(mixLevels)도 그대로 유효하다.
+const MELODY_HARMONICS = [0, 1, 0.45, 0.22, 0.1];
+
+function melodyWave(ctx) {
+  const real = new Float32Array(MELODY_HARMONICS.length);
+  return ctx.createPeriodicWave(real, Float32Array.from(MELODY_HARMONICS));
+}
+
+// 멜로디를 악기로 연주한다. 저역 삼각파 패드가 화자 음높이가 낮을 때 웅웅거려
+// 사용자가 "비프음"으로 들었으므로 저역통과로 거친 배음을 깎아 순하게 남긴다.
 //
 // 음 시각을 돌려주는 쪽이 이 함수다 — 화면 구슬이 이 시각을 그대로 쓴다.
 function scheduleMelody(ctx, dest, melody, startTime, level) {
   const secPerBeat = 60 / melody.bpm;
   const lowpass = ctx.createBiquadFilter();
   lowpass.type = 'lowpass';
-  lowpass.frequency.value = 1400;
+  // 1400Hz로 막으면 배음이 통째로 잘려 다시 사인파가 된다 — 3kHz까지 열어 둔다.
+  lowpass.frequency.value = 3000;
   lowpass.connect(dest);
 
+  const wave = melodyWave(ctx);
   const noteTimes = [];
   let when = startTime;
   for (const note of melody.notes) {
     const noteSec = note.beats * secPerBeat;
     noteTimes.push(when);
     const osc = ctx.createOscillator();
-    osc.type = 'sine';
+    osc.setPeriodicWave(wave);
     osc.frequency.value = midiToHz(note.midi);
     const gain = ctx.createGain();
+    // 감쇠를 얕게 둔다(0.4배 → 0.75배). 목소리는 감쇠가 없으므로 깊게 감쇠하면
+    // 평균 음량이 목소리보다 훨씬 낮아져 "멜로디가 작다"로 들린다.
     gain.gain.setValueAtTime(0, when);
     gain.gain.linearRampToValueAtTime(level, when + 0.02);
-    gain.gain.exponentialRampToValueAtTime(level * 0.4, when + noteSec * 0.85);
+    gain.gain.setValueAtTime(level, when + noteSec * 0.6);
+    gain.gain.exponentialRampToValueAtTime(level * 0.75, when + noteSec * 0.9);
     gain.gain.linearRampToValueAtTime(0, when + noteSec);
     osc.connect(gain);
     gain.connect(lowpass);
@@ -227,7 +243,9 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
 // 먼저 기준선까지 올려 두면 마이크 레벨과 무관하게 둘의 균형이 같아진다.
 const VOICE_PEAK = 0.89; // 정규화 목표 피크
 const VOICE_GAIN_MAX = 8; // 무음·잡음만 있는 녹음을 증폭하지 않기 위한 상한
-const MELODY_TO_VOICE = 2.2; // 정규화된 목소리 RMS 대비 멜로디 진폭
+// 정규화된 목소리 RMS 대비 멜로디 진폭. 실기 청취로 정했다(1 → 작다, 2.2 → 여전히
+// 작다, 3 → 적당). 배음을 얹어 지각 음량이 함께 올랐으므로 이 숫자만의 결과는 아니다.
+const MELODY_TO_VOICE = 3;
 
 export function mixLevels(samples, fromSample, lengthSamples, ratio = MELODY_TO_VOICE) {
   let sum = 0;

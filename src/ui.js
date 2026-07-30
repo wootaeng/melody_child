@@ -384,7 +384,8 @@ function diagnostics() {
     facts.push(
       `목소리 ${span.sec.toFixed(1)}초`,
       `증폭 ${voiceGain.toFixed(1)}배`,
-      `멜로디 ${melodyLevel.toFixed(2)}`,
+      // 상한에 붙으면 비율(?mel=)을 더 올려도 변화가 없다 — 그 사실을 드러낸다
+      `멜로디 ${melodyLevel.toFixed(2)}${melodyLevel >= 1 ? ' 상한' : ''}`,
     );
     if (aligned && session.bounds.length) {
       const { totalSec, gridSec } = alignToBeats(
