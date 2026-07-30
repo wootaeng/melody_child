@@ -169,7 +169,29 @@ export function voiceSpan(audioBuffer, bounds) {
 //
 // 각 음절이 차지하는 칸 수는 자연 간격을 격자로 반올림한 값이다. 그래서 원래 리듬이
 // 유지되고(빠르게 말한 곳은 붙어 있다) 총 길이도 거의 그대로다.
-const DIVISIONS = [1, 2, 4];
+// 후보 격자의 상·하한. 상한이 없으면 4분음표 격자(96bpm에서 625ms)가 뽑히는데,
+// 실측에서 그 격자는 2.2초 발화를 3.75초로 늘려 다시 끊기게 만들었다. 실기에서도
+// 격자가 625ms까지 올라간 것이 관측됐다 — 쉼이 중앙값을 끌어올리기 때문이다
+// (실제 녹음은 음절 사이에 무음이 없어 슬라이서가 어절 덩이를 잡고, 그 간격에 쉼이 섞인다).
+const GRID_MIN_SEC = 0.12;
+const GRID_MAX_SEC = 0.4;
+const DIVISIONS = [1, 2, 4, 8];
+
+// 격자는 화자의 말 속도에서 고른다. 긴 쉼은 통계에서 빼고(쉼은 격자가 아니라
+// 배정 칸 수로 표현된다), 후보는 위 상·하한 안에서만 고른다.
+function pickGrid(spans, beatSec) {
+  const inPhrase = spans.filter((s) => s <= GRID_MAX_SEC * 1.5);
+  const pool = (inPhrase.length >= 2 ? inPhrase : spans).slice().sort((a, b) => a - b);
+  const target = pool[Math.floor(pool.length / 2)] || beatSec;
+
+  let grid = null;
+  for (const div of DIVISIONS) {
+    const candidate = beatSec / div;
+    if (candidate < GRID_MIN_SEC || candidate > GRID_MAX_SEC) continue;
+    if (grid === null || Math.abs(candidate - target) < Math.abs(grid - target)) grid = candidate;
+  }
+  return grid === null ? Math.min(GRID_MAX_SEC, Math.max(GRID_MIN_SEC, beatSec)) : grid;
+}
 
 export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
   const onsets = bounds.map((seg) => seg.start / sampleRate);
@@ -177,13 +199,7 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
   const spans = bounds.map(
     (seg, i) => (i + 1 < bounds.length ? onsets[i + 1] : seg.end / sampleRate + tailSec) - onsets[i],
   );
-  const sorted = [...spans].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)] || beatSec;
-
-  let gridSec = beatSec;
-  for (const div of DIVISIONS) {
-    if (Math.abs(beatSec / div - median) < Math.abs(gridSec - median)) gridSec = beatSec / div;
-  }
+  const gridSec = pickGrid(spans, beatSec);
 
   const placed = [];
   let at = 0;
@@ -204,16 +220,20 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
   return { placed, totalSec: at, gridSec };
 }
 
-// 목소리와 멜로디의 음량 비. 고정 숫자로 두면 마이크 레벨이 다른 녹음마다
-// 어긋난다("목소리만 크다") — 목소리 RMS에 비례해 정하고, 둘의 합이 1을 넘지
-// 않게 마스터로 눌러 클리핑을 막는다(비율은 유지된다).
-const MELODY_TO_VOICE = 1.6;
+// 목소리를 먼저 정규화하고 그 위에서 멜로디 비율을 잡는다.
+//
+// 절대 RMS에 비례시키면 작게 녹음한 날은 멜로디가 하한에 붙고 전체가 작아진다
+// (실기 지적: "멜로디가 작다 / 내 녹음이 작아서인가" — 그렇다). 목소리 피크를
+// 먼저 기준선까지 올려 두면 마이크 레벨과 무관하게 둘의 균형이 같아진다.
+const VOICE_PEAK = 0.89; // 정규화 목표 피크
+const VOICE_GAIN_MAX = 8; // 무음·잡음만 있는 녹음을 증폭하지 않기 위한 상한
+const MELODY_TO_VOICE = 2.2; // 정규화된 목소리 RMS 대비 멜로디 진폭
 
-export function mixLevels(samples, fromSample, lengthSamples) {
+export function mixLevels(samples, fromSample, lengthSamples, ratio = MELODY_TO_VOICE) {
   let sum = 0;
   let peak = 0;
-  const end = Math.min(samples.length, fromSample + lengthSamples);
   let n = 0;
+  const end = Math.min(samples.length, fromSample + lengthSamples);
   for (let i = Math.max(0, fromSample); i < end; i++) {
     const a = samples[i];
     sum += a * a;
@@ -221,20 +241,26 @@ export function mixLevels(samples, fromSample, lengthSamples) {
     if (Math.abs(a) > peak) peak = Math.abs(a);
   }
   const rms = n ? Math.sqrt(sum / n) : 0;
-  const melodyLevel = Math.min(0.45, Math.max(0.12, rms * MELODY_TO_VOICE));
-  return { melodyLevel, master: Math.min(0.9, 0.98 / Math.max(0.01, peak + melodyLevel)) };
+  const voiceGain = Math.min(VOICE_GAIN_MAX, Math.max(1, VOICE_PEAK / Math.max(0.02, peak)));
+  // 상한은 실질적으로 걸리지 않게 둔다. 0.6으로 두니 보통 음량 녹음에서 걸려
+  // 비율이 아니라 상한이 음량을 결정했다(테스트에서 0.445 vs 0.6으로 갈렸다).
+  // 합이 1을 넘는 문제는 아래 마스터가 비율을 유지한 채 눌러서 해결한다.
+  const melodyLevel = Math.min(1, Math.max(0.08, rms * voiceGain * ratio));
+  // 정규화한 목소리 피크와 멜로디가 겹쳐도 1을 넘지 않게 눌러 둔다(비율은 유지)
+  const master = Math.min(1, 0.97 / (Math.min(VOICE_PEAK, peak * voiceGain) + melodyLevel));
+  return { voiceGain, melodyLevel, master };
 }
 
 const FADE_SEC = 0.02; // 조각 경계에서 딱 소리가 나지 않을 만큼만
 
 // 한 덩이의 목소리를 페이드 인·아웃으로 얹는다. 잘린 자리는 쉼 구간이므로
 // 이 페이드가 말을 건드리지 않는다.
-function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur) {
+function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur, level) {
   const fade = Math.min(FADE_SEC, dur / 3);
   const gain = ctx.createGain();
   gain.gain.setValueAtTime(0, when);
-  gain.gain.linearRampToValueAtTime(1, when + fade);
-  gain.gain.setValueAtTime(1, when + dur - fade);
+  gain.gain.linearRampToValueAtTime(level, when + fade);
+  gain.gain.setValueAtTime(level, when + dur - fade);
   gain.gain.linearRampToValueAtTime(0, when + dur);
   gain.connect(dest);
 
@@ -250,13 +276,14 @@ function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur) {
 // 짧은 음절 뒤에 침묵이 들어가 말이 끊긴다. 그래서 두 방식만 둔다:
 //   align=true(기본)  음절 시작만 박에 맞추고 뒤의 쉼으로 흡수한다 — 음절은 온전
 //   align=false        녹음을 통째로 흘려보낸다 — 박에 안 맞는 대신 완전히 자연스럽다
-function buildChantGraph(ctx, { audioBuffer, bounds, melody, align = true }, startTime) {
+function buildChantGraph(ctx, { audioBuffer, bounds, melody, align = true, melodyRatio }, startTime) {
   const { from, sec } = voiceSpan(audioBuffer, bounds);
   const sr = audioBuffer.sampleRate;
-  const { melodyLevel, master: masterGain } = mixLevels(
+  const { voiceGain, melodyLevel, master: masterGain } = mixLevels(
     audioBuffer.getChannelData(0),
     Math.round(from * sr),
     Math.round(sec * sr),
+    melodyRatio,
   );
 
   const master = ctx.createGain();
@@ -267,11 +294,11 @@ function buildChantGraph(ctx, { audioBuffer, bounds, melody, align = true }, sta
   if (align && bounds.length) {
     const { placed, totalSec } = alignToBeats(bounds, sr, 60 / melody.bpm);
     for (const chunk of placed) {
-      scheduleVoiceChunk(ctx, master, audioBuffer, startTime + chunk.at, chunk.from, chunk.dur);
+      scheduleVoiceChunk(ctx, master, audioBuffer, startTime + chunk.at, chunk.from, chunk.dur, voiceGain);
     }
     voiceSec = totalSec;
   } else {
-    scheduleVoiceChunk(ctx, master, audioBuffer, startTime, from, sec);
+    scheduleVoiceChunk(ctx, master, audioBuffer, startTime, from, sec, voiceGain);
   }
 
   const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, melodyLevel);

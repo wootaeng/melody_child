@@ -20,6 +20,8 @@ const debugMode = urlParams.has('debug');
 // 챈트에서 음절 시작을 박에 맞출지. 기본은 맞춘다(박에 안 맞는 게 거슬린다는
 // 실기 지적) — `?align=0`이면 녹음을 통째로 흘려보내는 이전 방식이다.
 const aligned = urlParams.get('align') !== '0';
+// 멜로디 음량 비율(정규화한 목소리 RMS 대비). 귀로 맞추는 값이라 URL로 뺐다.
+const melodyRatio = Number(urlParams.get('mel')) > 0 ? Number(urlParams.get('mel')) : undefined;
 
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
@@ -227,7 +229,7 @@ function refreshMelody() {
 function renderSpec() {
   // 챈트는 목소리를 자르지 않고 멜로디를 아래에 깐다(chant). align이면 음절 시작만
   // 박에 맞춘다. 나머지 모드는 음절을 음정으로 옮겨 배치하고 반주는 선택이다.
-  return { ...session, chant: mode === 'chant', align: aligned, pad: withPad };
+  return { ...session, chant: mode === 'chant', align: aligned, pad: withPad, melodyRatio };
 }
 
 function analyze(audioBuffer, transcript) {
@@ -373,12 +375,17 @@ function diagnostics() {
   if (!session.voices) {
     // 챈트 진단: 목소리 길이와 멜로디 음량(목소리 RMS에서 나온다)
     const span = voiceSpan(session.audioBuffer, session.bounds);
-    const { melodyLevel } = mixLevels(
+    const { melodyLevel, voiceGain } = mixLevels(
       session.audioBuffer.getChannelData(0),
       Math.round(span.from * sr),
       Math.round(span.sec * sr),
+      melodyRatio,
     );
-    facts.push(`목소리 ${span.sec.toFixed(1)}초`, `멜로디 ${melodyLevel.toFixed(2)}`);
+    facts.push(
+      `목소리 ${span.sec.toFixed(1)}초`,
+      `증폭 ${voiceGain.toFixed(1)}배`,
+      `멜로디 ${melodyLevel.toFixed(2)}`,
+    );
     if (aligned && session.bounds.length) {
       const { totalSec, gridSec } = alignToBeats(
         session.bounds,
