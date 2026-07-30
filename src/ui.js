@@ -1,21 +1,32 @@
 import { sliceSyllables } from './slicer.js';
-import { detectF0, findGrain } from './pitch.js';
+import { findGrain } from './pitch.js';
+import { findPitchMarks } from './psola.js';
 import { composeMelody, VERSE_LEN } from './composer.js';
-import { buildGraph, renderOffline, safeStartTime } from './synth.js';
+import { renderOffline, progressAt, renderVoices } from './synth.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
 import { makeDevSample } from './devsample.js';
 
 const MIN_NOTES = VERSE_LEN; // 최소 한 절
+const NARROW_DEGREES = [0, 2, 4]; // 도·레·미 — 옮기는 폭이 4반음 안에 머문다
+
+// URL 손잡이. 음정을 옮기는 폭이 곧 목소리 왜곡의 양이라, 실기에서 귀로 비교할
+// 수 있게 밖으로 뺐다. mode=chant(음정 안 옮김·박자만) / narrow(도레미) / 기본(5음계),
+// pad=1(반주 아르페지오), debug=1(진단 숫자 — 폰에서는 콘솔을 볼 수 없다).
+const urlParams = new URLSearchParams(location.search);
+const mode = urlParams.get('mode') || 'full';
+const withPad = urlParams.has('pad');
+const debugMode = urlParams.has('debug');
 
 const el = (id) => document.getElementById(id);
 const screens = { idle: el('screen-idle'), recording: el('screen-recording'), result: el('screen-result') };
 
-let session = null; // { audioBuffer, segments, grains, transcript, bounds, rawCount, referenceHz, melody }
+// renderOffline에 이 객체를 그대로 넘긴다 — 필드를 골라 옮기면 재생과 저장이
+// 갈라진다. songUrl·songBlob·noteTimes는 렌더 결과 캐시(멜로디가 바뀌면 버린다).
+let session = null; // { audioBuffer, segments, grains, pitchMarks, transcript, bounds, rawCount, referenceHz, melody, voices, songUrl, songBlob, noteTimes }
 let seed = 1;
 let handle = null;
-let audioCtx = null;
-let playingMaster = null;
+let player = null;
 let playToken = 0;
 let beadRaf = 0;
 
@@ -32,10 +43,14 @@ function setNotice(text) {
 // 조각이 한 절(8개)보다 적으면 순환 반복해 채운다. 상한은 없다 —
 // 이야기가 길면 절이 늘어난다. 이 정규화를 여기서 끝내므로
 // synth.buildGraph는 개수 불일치를 다루지 않는다.
-function normalizeSegments(segments) {
-  const out = segments.slice();
-  for (let i = 0; out.length < MIN_NOTES; i++) out.push(segments[i % segments.length]);
-  return out;
+//
+// 조각이 아니라 인덱스를 반복한다: 분석(f0·피치 마크)은 원본 조각 수만큼만 하고
+// 반복분은 결과를 같이 가리키게 된다. 조각을 먼저 늘리면 1음절 녹음에서 같은
+// 조각을 여덟 번 분석한다.
+function normalizeIndices(count) {
+  const indices = Array.from({ length: count }, (_, i) => i);
+  for (let i = 0; indices.length < MIN_NOTES; i++) indices.push(i % count);
+  return indices;
 }
 
 const COLOR = {
@@ -64,7 +79,9 @@ function fitCanvas(canvas) {
 
 // 시그니처 요소. 음절 하나가 구슬 하나, 높이가 음높이, 크기가 음 길이다.
 // melody가 없으면(아직 말하기 전) 점선만 그려 자리를 알려준다.
-function drawBeads(melody, activeIndex = -1) {
+// progress는 0~1 재생 위치(구슬 사이를 시간으로 보간한 값) — 음악 앱처럼 선이
+// 지나간다. -1이면 그리지 않는다(정지 상태).
+function drawBeads(melody, activeIndex = -1, progress = -1) {
   const { ctx, width, height } = fitCanvas(el('beads'));
   ctx.clearRect(0, 0, width, height);
 
@@ -110,6 +127,17 @@ function drawBeads(melody, activeIndex = -1) {
   ctx.beginPath();
   notes.forEach((_, i) => (i ? ctx.lineTo(xAt(i), yAt(i)) : ctx.moveTo(xAt(i), yAt(i))));
   ctx.stroke();
+
+  // 재생 위치. 구슬보다 먼저 그려 구슬이 선 위에 온다.
+  if (progress >= 0) {
+    const x = padX + (width - padX * 2) * Math.min(1, progress);
+    ctx.strokeStyle = COLOR.voiceRest;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, top - 16);
+    ctx.lineTo(x, bottom + 16);
+    ctx.stroke();
+  }
 
   notes.forEach((note, i) => {
     const r = note.beats >= 1 ? 8 : 5.5;
@@ -164,8 +192,28 @@ function drawWaveform(samples, segments) {
 }
 
 // 멜로디는 한 곳에서만 만든다. 재생·저장·안내 문구가 같은 곡을 봐야 한다.
+// 목소리 버퍼도 여기서 함께 만든다 — 멜로디가 바뀔 때만 다시 만들면 되고,
+// 재생 직전에 만들면 시작 시각을 잡은 뒤 수십 ms를 먹어 첫 음이 밀린다.
 function refreshMelody() {
-  session.melody = composeMelody(session.segments.length, seed, session.referenceHz);
+  dropSong();
+  session.melody = composeMelody(session.segments.length, seed, session.referenceHz, {
+    degrees: mode === 'narrow' ? NARROW_DEGREES : undefined,
+  });
+  session.voices = renderVoices(session.audioBuffer.getChannelData(0), session.audioBuffer.sampleRate, session);
+}
+
+// 렌더에 넘길 재료. 모드에 따라 목소리를 손대는 정도만 달라진다 —
+// 박자·구슬·저장은 전부 같은 경로를 탄다.
+function renderSpec() {
+  const chant = mode === 'chant';
+  return {
+    ...session,
+    // 챈트: 음정을 아예 옮기지 않는다. grains를 비우면 scheduleSegment가 원음을
+    // 그대로 리듬에 얹는 경로(무성 자음용)를 타므로 새 분기를 만들 필요가 없다.
+    grains: chant ? session.grains.map(() => null) : session.grains,
+    voices: chant ? session.voices.map(() => null) : session.voices,
+    pad: withPad,
+  };
 }
 
 function analyze(audioBuffer, transcript) {
@@ -174,8 +222,18 @@ function analyze(audioBuffer, transcript) {
   const found = sliceSyllables(samples, sampleRate);
   if (found.length === 0) return null;
 
-  const segments = normalizeSegments(found);
-  const grains = segments.map((seg) => findGrain(samples, sampleRate, seg));
+  // 피치 마크는 멜로디와 무관하다(조각과 그 음절의 f0에만 의존) — 여기서 한 번만
+  // 찍는다. buildGraph는 재생·리믹스마다 불리므로 그 안에서 찍으면 같은 계산을
+  // 반복한다. 그레인이 없는 무성 자음은 애초에 음정을 옮기지 않으므로 건너뛴다.
+  const foundGrains = found.map((seg) => findGrain(samples, sampleRate, seg));
+  const foundMarks = found.map((seg, i) =>
+    foundGrains[i] ? findPitchMarks(samples, sampleRate, seg, { periodHint: sampleRate / foundGrains[i].f0 }) : null,
+  );
+
+  const indices = normalizeIndices(found.length);
+  const segments = indices.map((i) => found[i]);
+  const grains = indices.map((i) => foundGrains[i]);
+  const pitchMarks = indices.map((i) => foundMarks[i]);
   const voiced = grains.filter(Boolean).map((g) => g.f0).sort((a, b) => a - b);
   const referenceHz = voiced.length ? voiced[Math.floor(voiced.length / 2)] : null;
   // 그리기는 여기서 하지 않는다 — 결과 화면이 아직 hidden이라 캔버스 크기가 0이다.
@@ -184,6 +242,7 @@ function analyze(audioBuffer, transcript) {
     audioBuffer,
     segments,
     grains,
+    pitchMarks,
     transcript,
     bounds: found,
     rawCount: found.length,
@@ -196,9 +255,9 @@ function stopBeads() {
   beadRaf = 0;
 }
 
-// 구슬을 소리에 맞춰 켠다. 시각은 buildGraph가 준 것을 그대로 쓴다 —
-// 여기서 다시 계산하면 화면과 소리가 어긋난다.
-function followBeads(ctx, noteTimes, melody) {
+// 구슬을 소리에 맞춰 켠다. 시각은 렌더가 준 noteTimes와 재생 중인 요소의
+// currentTime을 쓴다 — 화면이 박자를 다시 계산하면 소리와 어긋난다.
+function followBeads(media, noteTimes, melody) {
   stopBeads();
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     drawBeads(melody, -1);
@@ -206,11 +265,11 @@ function followBeads(ctx, noteTimes, melody) {
   }
   const last = noteTimes[noteTimes.length - 1];
   const tick = () => {
-    const t = ctx.currentTime;
+    const t = media.currentTime;
     let active = -1;
     for (let i = 0; i < noteTimes.length; i++) if (t >= noteTimes[i]) active = i;
-    drawBeads(melody, active);
-    if (t > last + 1) {
+    drawBeads(melody, active, progressAt(noteTimes, t));
+    if (media.ended || media.paused || t > last + 1.5) {
       beadRaf = 0;
       drawBeads(melody, -1);
       return;
@@ -222,73 +281,87 @@ function followBeads(ctx, noteTimes, melody) {
 
 function stopPlayback() {
   stopBeads();
-  if (playingMaster) {
-    playingMaster.disconnect();
-    playingMaster = null;
+  if (player) {
+    player.pause();
+    player.currentTime = 0;
   }
   if (session?.melody) drawBeads(session.melody, -1);
 }
 
-// iOS는 재생이 끝나면 컨텍스트를 interrupted 상태로 두는 경우가 있다. 그 상태의
-// 시계는 멈춰 있어서 그 시각에 스케줄하면 아무 소리도 나지 않는다 — "다시 듣기가
-// 안 된다"는 증상이 여기서 나온다. resume 후에도 running이 아니면 새로 만든다.
-async function playbackContext() {
-  if (audioCtx && audioCtx.state === 'closed') audioCtx = null;
-  if (!audioCtx) audioCtx = new AudioContext();
-  await audioCtx.resume();
-  if (audioCtx.state !== 'running') {
-    try {
-      await audioCtx.close();
-    } catch {
-      /* 이미 닫힌 경우 */
-    }
-    audioCtx = new AudioContext();
-    await audioCtx.resume();
+// 곡을 한 번 렌더해 WAV로 만들어 둔다. 재생과 저장이 같은 바이트를 쓰므로
+// "들은 것"과 "내려받은 것"이 어긋날 수 없다. 멜로디가 바뀌면 버린다.
+async function songUrl() {
+  if (!session.songUrl) {
+    const { buffer, noteTimes } = await renderOffline(renderSpec());
+    const channels = Array.from({ length: buffer.numberOfChannels }, (_, c) => buffer.getChannelData(c));
+    session.songBlob = encodeWav(channels, buffer.sampleRate);
+    session.songUrl = URL.createObjectURL(session.songBlob);
+    session.noteTimes = noteTimes;
   }
-  return audioCtx;
+  return session.songUrl;
 }
 
+function dropSong() {
+  if (session?.songUrl) URL.revokeObjectURL(session.songUrl);
+  if (session) {
+    session.songUrl = null;
+    session.songBlob = null;
+  }
+}
+
+// Web Audio로 직접 재생하지 않고 <audio> 요소로 재생한다.
+//
+// 아이폰에서 "다시 듣기가 안 되는데 내려받은 WAV는 들린다"는 보고가 이 차이를
+// 가리켰다: Web Audio 출력은 음소거 스위치와 오디오 세션 상태(iOS는 재생이 끝나면
+// 컨텍스트를 interrupted로 두는 경우가 있고, 그 상태의 시계는 멈춰 있다)에 묶이는데
+// 미디어 요소 재생은 그렇지 않다. 렌더한 WAV를 그대로 재생하면 그 경로를 아예
+// 쓰지 않게 되고, 컨텍스트 되살리기·시계 대기 같은 우회 코드도 필요 없어진다.
 async function play() {
   const token = ++playToken;
   stopPlayback();
   const current = session;
   if (!current) return;
 
-  const ctx = await playbackContext();
-  const startTime = await safeStartTime(ctx);
+  const url = await songUrl();
   // await 사이에 다시 녹음·연타가 끼어들면 이 재생은 이미 무효다
   if (token !== playToken || session !== current) return;
 
-  // 전역 audioCtx가 아니라 이 호출이 받은 ctx를 쓴다 — playbackContext가
-  // 컨텍스트를 교체했을 수 있고, 그때 전역을 쓰면 엉뚱한 곳에 스케줄한다
-  const { master, noteTimes } = buildGraph(
-    ctx,
-    {
-      audioBuffer: current.audioBuffer,
-      segments: current.segments,
-      grains: current.grains,
-      melody: current.melody,
-    },
-    startTime,
-  );
-  playingMaster = master;
-  followBeads(ctx, noteTimes, current.melody);
+  if (!player) {
+    player = new Audio();
+    player.preload = 'auto';
+  }
+  if (player.src !== url) player.src = url;
+  player.currentTime = 0;
+  await player.play();
+  followBeads(player, current.noteTimes, current.melody);
 }
 
 async function save() {
-  const rendered = await renderOffline({
-    audioBuffer: session.audioBuffer,
-    segments: session.segments,
-    grains: session.grains,
-    melody: session.melody,
-  });
-  const channels = Array.from({ length: rendered.numberOfChannels }, (_, c) => rendered.getChannelData(c));
-  const url = URL.createObjectURL(encodeWav(channels, rendered.sampleRate));
+  await songUrl(); // 재생과 같은 렌더 결과를 쓴다
   const link = document.createElement('a');
-  link.href = url;
+  link.href = session.songUrl;
   link.download = '내동요.wav';
   link.click();
-  URL.revokeObjectURL(url);
+}
+
+// 실기(아이폰)에서 소리가 이상할 때 원인을 좁히기 위한 숫자. 화면에서 읽어
+// 전달할 수 있어야 하므로 콘솔이 아니라 칩으로 띄운다 — 폰에서는 콘솔을 못 본다.
+// PSOLA가 몇 음에 실제로 적용됐는지가 핵심이다(폴백 그레인 루프가 곧 비프음이다).
+function diagnostics() {
+  const sr = session.audioBuffer.sampleRate;
+  const spans = session.pitchMarks.map((pm) => (pm ? pm.marks[pm.marks.length - 1] - pm.marks[0] : 0));
+  const used = session.voices.map((v, i) => (v && spans[i] > 0 ? i : -1)).filter((i) => i >= 0);
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  const midis = session.melody.notes.map((n) => n.midi);
+  return [
+    `mode ${mode}${withPad ? '+pad' : ''}`,
+    `psola ${mode === 'chant' ? 0 : session.voices.filter(Boolean).length}/${session.voices.length}`,
+    `재료 ${Math.round((avg(used.map((i) => spans[i])) / sr) * 1000)}ms`,
+    `채움 ${avg(used.map((i) => session.voices[i].length / spans[i])).toFixed(1)}배`,
+    `기준 ${Math.round(session.referenceHz || 0)}Hz`,
+    `${session.melody.bpm}bpm`,
+    `midi ${Math.min(...midis)}~${Math.max(...midis)}`,
+  ];
 }
 
 function showResult() {
@@ -298,6 +371,7 @@ function showResult() {
   // 칩은 사실만 담는다 — 절 수와 음절 수는 아이가 화면에서 확인할 수 있는 정보다
   const facts = [`${session.melody.verseCount}절`, `${session.segments.length}음절`];
   if (session.rawCount < MIN_NOTES) facts.push('짧아서 반복했어요');
+  if (debugMode) facts.push(...diagnostics());
   el('chips').replaceChildren(
     ...facts.map((text) => {
       const li = document.createElement('li');
@@ -382,11 +456,12 @@ async function finishSession() {
 }
 
 function loadDevSample(glideCents) {
-  const ctx = new AudioContext();
+  // 버퍼를 만들 뿐이라 오프라인 컨텍스트로 충분하다. 라이브 AudioContext를
+  // 열면 사용자 제스처 없는 로드 시점이라 자동재생 정책 경고가 뜬다.
+  const ctx = new OfflineAudioContext(1, 1, 48000);
   const samples = makeDevSample(ctx.sampleRate, { glideCents });
   const audioBuffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
   audioBuffer.copyToChannel(samples, 0);
-  ctx.close();
   const analyzed = analyze(audioBuffer, '개발용 샘플');
   if (!analyzed) throw new Error('개발 샘플 분석 실패');
   session = analyzed;
@@ -420,6 +495,7 @@ el('remix').addEventListener(
 el('download').addEventListener('click', guarded(save, 'WAV 파일을 만들지 못했어요.'));
 el('again').addEventListener('click', () => {
   stopPlayback();
+  dropSong();
   session = null;
   setNotice('');
   drawBeads(null);
@@ -436,7 +512,7 @@ window.addEventListener('resize', () => {
 
 el('limit-hint').textContent = `${MAX_RECORD_MS / 1000}초까지 녹음돼요.`;
 
-const devMode = new URLSearchParams(location.search).get('dev');
+const devMode = urlParams.get('dev');
 if (devMode === 'sample') {
   loadDevSample(0);
 } else if (devMode === 'glide') {

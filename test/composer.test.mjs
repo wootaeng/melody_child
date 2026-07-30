@@ -2,6 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { composeMelody, midiToHz, PENTATONIC, VERSE_LEN } from '../src/composer.js';
 
+test('음계를 좁히면 음역도 그만큼 좁아진다 (목소리 왜곡 조절 손잡이)', () => {
+  for (let seed = 1; seed <= 12; seed++) {
+    const melody = composeMelody(8, seed, 220, { degrees: [0, 2, 4] });
+    const offsets = melody.notes.map((n) => n.midi - melody.tonicMidi);
+    for (const off of offsets) {
+      assert.ok([0, 2, 4].includes(off), `seed ${seed}: 음계 밖 음 ${off}`);
+    }
+    assert.ok(Math.max(...offsets) - Math.min(...offsets) <= 4, `seed ${seed}: 음역이 넓다`);
+  }
+  assert.throws(() => composeMelody(8, 1, 220, { degrees: [0] }), RangeError);
+});
+
 test('요청한 개수만큼 음을 만든다', () => {
   for (const count of [1, 3, 8, 17, 24, 60, 137]) {
     assert.equal(composeMelody(count, 1).notes.length, count, `count=${count}`);

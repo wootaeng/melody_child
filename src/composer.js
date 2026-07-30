@@ -27,9 +27,14 @@ function mulberry32(seed) {
 
 const PHRASE_LEN = 4;
 
-export function composeMelody(noteCount, seed, referenceHz) {
+// degrees로 쓰는 음계를 좁힐 수 있다. 음역이 좁으면 음절을 목표 음정까지 옮기는
+// 폭도 줄어 목소리 왜곡이 작아진다 — 기계음이 거슬릴 때의 조절 손잡이다.
+export function composeMelody(noteCount, seed, referenceHz, { degrees = PENTATONIC } = {}) {
   if (!Number.isInteger(noteCount) || noteCount < 1) {
     throw new RangeError(`noteCount는 1 이상의 정수여야 한다: ${noteCount}`);
+  }
+  if (!Array.isArray(degrees) || degrees.length < 2) {
+    throw new RangeError('degrees는 음이 둘 이상이어야 한다');
   }
   const rnd = mulberry32(seed);
   let tonicMidi = 60 + Math.floor(rnd() * 5); // C4~E4
@@ -46,11 +51,11 @@ export function composeMelody(noteCount, seed, referenceHz) {
   // 선을 만들고, 옥타브 점프는 쓰지 않는다 — 점프가 음역을 넓혀 재생 속도까지
   // 극단으로 밀어 목소리를 망가뜨렸다.
   const STEPS = [-1, 0, 1, 1, -1, 1, -1, 0, 2, -2];
-  let degree = Math.floor(rnd() * PENTATONIC.length);
+  let degree = Math.floor(rnd() * degrees.length);
 
   const nextDegree = () => {
     const step = STEPS[Math.floor(rnd() * STEPS.length)];
-    degree = Math.min(PENTATONIC.length - 1, Math.max(0, degree + step));
+    degree = Math.min(degrees.length - 1, Math.max(0, degree + step));
     return degree;
   };
 
@@ -58,7 +63,7 @@ export function composeMelody(noteCount, seed, referenceHz) {
   // 으뜸음으로 닫는다 — 묻고 답하는 동요의 기본 골격이다.
   const makePhrase = (closing) => {
     const phrase = Array.from({ length: PHRASE_LEN }, () => ({
-      midi: tonicMidi + PENTATONIC[nextDegree()],
+      midi: tonicMidi + degrees[nextDegree()],
       beats: 1,
     }));
 
@@ -66,8 +71,9 @@ export function composeMelody(noteCount, seed, referenceHz) {
       degree = 0;
       phrase[PHRASE_LEN - 1] = { midi: tonicMidi, beats: 1 };
     } else if (phrase[PHRASE_LEN - 1].midi === tonicMidi) {
-      degree = 2; // 앞 프레이즈가 으뜸음으로 닫히면 답할 것이 없어진다
-      phrase[PHRASE_LEN - 1] = { midi: tonicMidi + PENTATONIC[2], beats: 1 };
+      // 앞 프레이즈가 으뜸음으로 닫히면 답할 것이 없어진다 — 열어 둔다
+      degree = Math.min(2, degrees.length - 1);
+      phrase[PHRASE_LEN - 1] = { midi: tonicMidi + degrees[degree], beats: 1 };
     }
 
     // 리듬은 4분음표 위주이고 8분음표는 둘씩 붙인다. 마지막 음을 확정한 뒤에
