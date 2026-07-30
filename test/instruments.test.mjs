@@ -82,6 +82,40 @@ test('새 악기는 배음이 1kHz 위까지 닿는다 (귀가 가장 민감한 
   }
 });
 
+// 프리셋의 실효 음량. createPeriodicWave가 피크를 1로 정규화하므로 같은 level이라도
+// 배음 배열이 바뀌면 실효 RMS가 달라진다 — 배음표만 고쳤는데 멜로디가 커지거나
+// 작아지는 통로다. 9차 진단이 이 계수를 빼먹어 +5.4dB(실제 +1.5dB)로 출발했다.
+function normalizedRms(harmonics) {
+  const N = 4096;
+  let peak = 0;
+  let sum = 0;
+  for (let n = 0; n < N; n++) {
+    let v = 0;
+    for (let k = 1; k < harmonics.length; k++) v += harmonics[k] * Math.sin((2 * Math.PI * k * n) / N);
+    peak = Math.max(peak, Math.abs(v));
+    sum += v * v;
+  }
+  return Math.sqrt(sum / N) / peak;
+}
+
+test('프리셋 실효 음량이 은근히 갈리지 않는다', () => {
+  // level × 정규화 RMS가 네 악기에서 같은 범위에 있어야 악기를 바꿔도 균형이 유지된다.
+  // 실측: piano 0.623 / orgel 0.570 / marimba 0.719 / synth 0.469.
+  const loudness = Object.fromEntries(
+    NAMES.map((n) => [n, INSTRUMENTS[n].level * normalizedRms(INSTRUMENTS[n].harmonics)]),
+  );
+  const values = Object.values(loudness);
+  const mid = (Math.max(...values) + Math.min(...values)) / 2;
+  for (const [name, value] of Object.entries(loudness)) {
+    assert.ok(
+      Math.abs(value - mid) / mid <= 0.25,
+      `${name}: 실효 음량 ${value.toFixed(3)} — 중앙 ${mid.toFixed(3)}에서 25%를 벗어났다 (${JSON.stringify(
+        Object.fromEntries(Object.entries(loudness).map(([k, v]) => [k, +v.toFixed(3)])),
+      )})`,
+    );
+  }
+});
+
 test('예전 소리는 그 대역에 구조적으로 못 닿았다 — 그게 "작다"의 원인이었다', () => {
   // 이 단정이 빨강이 되면 신디 프리셋이 예전 소리가 아니게 됐다는 뜻이다.
   // 7차에 기록한 "1~3kHz 에너지 54배"는 더 높은 픽스처 음에서 잰 값이라

@@ -3,6 +3,7 @@ import { findGrain } from './pitch.js';
 import { findPitchMarks } from './psola.js';
 import { composeMelody, VERSE_LEN } from './composer.js';
 import { renderOffline, progressAt, renderVoices, voiceSpan, alignToBeats, mixLevels } from './synth.js';
+import { ridePlan } from './leveler.js';
 import { encodeWav } from './exporter.js';
 import { startRecording, isSpeechRecognitionSupported, MAX_RECORD_MS } from './recorder.js';
 import { makeDevSample } from './devsample.js';
@@ -28,6 +29,17 @@ const melodyRatio = Number(urlParams.get('mel')) > 0 ? Number(urlParams.get('mel
 // 존재 확인이 먼저다 — Number(null)은 0이라 파라미터가 없을 때 사인파로 떨어진다.
 const melodyTone = urlParams.has('tone') && Number(urlParams.get('tone')) >= 0
   ? Number(urlParams.get('tone'))
+  : undefined;
+// 조용한 음절을 끌어올리는 상한(dB). `?ride=0`이면 완전히 우회해 라이드 이전과
+// **비트 단위로 같은** 소리가 난다 — 폰에서 그 A/B가 성립해야 "안 들린다"의 원인이
+// 동적 범위인지 가릴 수 있다. 청취로 맞추는 값이라 ?mel=·?tone=과 같이 URL로 뺀다.
+//
+// 존재 확인이 먼저다 — `Number(null)`은 0이라 파라미터가 없을 때 라이드가 꺼진다
+// (?tone=과 같은 함정). 숫자가 아니면 없는 것으로 본다: NaN을 그대로 넘기면 라이드가
+// 조용히 전체 우회되는데 진단 칩에는 `+0.0dB`로 찍혀 **"격차가 없는 녹음"과 구분되지
+// 않고**, 그건 그 칩의 목적(0.0이면 원인이 동적 범위가 아니다)과 정면으로 충돌한다.
+const rideDb = urlParams.has('ride') && Number.isFinite(Number(urlParams.get('ride')))
+  ? Math.max(0, Number(urlParams.get('ride')))
   : undefined;
 // 멜로디 악기. URL로 기본값을 정하고 화면 버튼으로 바꾼다 — 아이폰에서 주소를
 // 고치지 않고 A/B할 수 있어야 실기 청취가 굴러간다.
@@ -247,6 +259,7 @@ function renderSpec() {
     melodyRatio,
     melodyTone,
     instrument,
+    rideDb,
   };
 }
 
@@ -412,6 +425,20 @@ function diagnostics() {
       `증폭 ${voiceGain.toFixed(1)}배`,
       // 상한에 붙으면 비율(?mel=)을 더 올려도 변화가 없다 — 그 사실을 드러낸다
       `멜로디 ${melodyLevel.toFixed(2)}${melodyLevel >= 1 ? ' 상한' : ''}`,
+    );
+    // 라이드가 실제로 무엇을 했는지. **+0.0dB로 나오면 이 녹음에는 음절 간 격차가
+    // 없었다는 뜻**이고, 그러면 "안 들린다"의 원인이 동적 범위가 아니다 — 폰 화면에서
+    // 그걸 바로 읽을 수 있어야 다음 가설로 넘어갈 수 있다.
+    const ride = ridePlan(
+      session.audioBuffer.getChannelData(0),
+      sr,
+      Math.round(span.from * sr),
+      Math.round(span.sec * sr),
+      { maxBoostDb: rideDb },
+    );
+    facts.push(
+      `라이드 +${ride.meanBoostDb.toFixed(1)}dB` +
+        (ride.meanBoostDb > 0 ? ` (${Math.round(ride.spreadBeforeDb)}→${Math.round(ride.spreadAfterDb)})` : ''),
     );
     if (aligned && session.bounds.length) {
       const { totalSec, gridSec } = alignToBeats(

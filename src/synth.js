@@ -1,6 +1,7 @@
 import { midiToHz } from './composer.js';
 import { renderNote } from './psola.js';
 import { pickInstrument } from './instruments.js';
+import { ridePlan, applyRide } from './leveler.js';
 
 // 마지막 음이 끝난 뒤 남기는 여유. 재생 길이 보고와 오프라인 렌더 버퍼 할당이
 // 같은 값을 써야 한다 — 따로 두면 한쪽만 고쳤을 때 꼬리가 잘린다.
@@ -225,8 +226,53 @@ const GRID_MAX_SEC = 0.4;
 const DIVISIONS = [1, 2, 4, 8];
 // 배정 칸 수를 정할 때의 반올림 편향. 0.5면 보통 반올림이고, 낮출수록 내림이 잦아져
 // 삽입 침묵이 줄고 쉼이 짧아진다. 실기에서 "말이 살짝 끊긴다"의 원인이 그 침묵이라
-// 내림 쪽으로 둔다 — 격자 이탈이 커지면 이 값을 0.5로 되돌리면 된다.
+// 내림 쪽으로 둔다.
+//
+// 0.5로 되돌려도 이음매는 좋아지지 않는다(실측: 픽스처 4종 × bpm 3종에서 조각 수가
+// 6→6·5→5로 그대로이고 침묵만 37→288ms로 8배 늘었다). 격자가 자연 간격과 소수점까지
+// 같아지는 일이 실제 녹음에서 없기 때문이다 — 이음매는 아래 크로스페이드가 담당하고
+// 이 값은 침묵 총량만 담당한다. 두 관심사가 섞여 있던 것이 9차의 버그였다.
 const GRID_ROUND_BIAS = 0.25;
+
+// 조각 이음매 크로스페이드 길이.
+//
+// 앞 조각을 `dur` 뒤로 이만큼 더 읽으며 level→0으로 내리고, 뒤 조각은 같은 시각에
+// 0→level로 올린다. 상보 램프라 합이 1로 유지되고, **원본에서도 이어지는 경계라면
+// 두 조각이 같은 샘플을 읽어** 합이 원본과 정확히 같다(실측 복원 오차 0).
+//
+// 예전에는 페이드를 `dur` 안쪽에 걸었다. 그래서 (1) 출력이 붙어 있는 경계에서도
+// 진폭이 0까지 떨어졌고(실측: 이웃 게인 합 최소 0.000, 경계 40ms 창 RMS -4.8dB),
+// (2) 배정 칸이 음절 길이에 딱 맞은 조각에서는 페이드 아웃이 음절 꼬리를 직접
+// 먹었다(실측: 120bpm·음절 6개에서 6조각 중 5개). 둘 다 "말이 살짝 끊긴다"였다.
+//
+// 20ms는 예전 페이드 값을 그대로 쓴 것이다 — 실기 판정에 변수를 하나만 남긴다.
+// 경계에서 겹침이 "이중으로 들린다"로 판정되면 10ms까지 내리는 것이 첫 손잡이다.
+const XFADE_SEC = 0.02;
+
+// 한 덩이의 재생 계약. 게인은 `0 →(fadeSec)→ level`, `plateauSec`까지 고원,
+// `plateauSec → readSec`에서 `level → 0`이고 소스는 `readSec`만큼 읽는다.
+// 봉투 시각과 재생 길이의 관계를 여기 한 곳에서만 정한다 — 스케줄러(src.start의 길이)와
+// 길이 계산(totalSec)이 갈라지면 마지막 조각의 꼬리가 잘리거나 버퍼가 짧게 잡힌다.
+//
+// **재료를 `dur` 뒤로 더 읽는 것은 뒤 조각이 바로 이어질 때만이다.** 그때는 더 읽는
+// 20ms가 다음 조각이 같은 시각에 페이드 인으로 내는 것과 (거의) 같은 지점이라 시간차
+// 블렌드가 되고, 원본에서도 이어지는 경계라면 **정확히 같은 샘플**이라 합이 원본과 같다.
+//
+// 뒤에 침묵이 있으면(배정 칸이 재료보다 길다) 사정이 반대다. 그 자리에서 더 읽는 20ms는
+// **다음 음절의 머리**인데 다음 조각은 침묵만큼 뒤에 시작하므로, 그 머리가 최대 250ms
+// 앞당겨 거의 풀 게인으로 한 번 더 들린다 — 말을 더듬는 소리다(리뷰 실측: 임펄스 픽스처
+// 에서 앞당겨진 사본 0.98 vs 제자리 사본 0.0002). 그래서 그쪽은 페이드 아웃을 재료 안에
+// 둔다. 그 마지막 20ms는 음절 뒤 쉼이라 보통 무해하고, 쉼이 그보다 짧으면 꼬리 몇 ms가
+// 감쇠하는데 — 앞당긴 복제보다는 그게 낫다.
+export function chunkTiming(dur, fadeSec = XFADE_SEC, joinsNext = true) {
+  if (joinsNext) {
+    const fade = Math.min(fadeSec, dur);
+    return { fadeSec: fade, plateauSec: dur, readSec: dur + fade };
+  }
+  // 절반으로 클램프해 고원이 페이드 인보다 앞서지 않게 한다(봉투 시각 단조성)
+  const fade = Math.min(fadeSec, dur / 2);
+  return { fadeSec: fade, plateauSec: dur - fade, readSec: dur };
+}
 
 // 격자는 화자의 말 속도에서 고른다. 긴 쉼은 통계에서 빼고(쉼은 격자가 아니라
 // 배정 칸 수로 표현된다), 후보는 위 상·하한 안에서만 고른다.
@@ -244,7 +290,7 @@ function pickGrid(spans, beatSec) {
   return grid === null ? Math.min(GRID_MAX_SEC, Math.max(GRID_MIN_SEC, beatSec)) : grid;
 }
 
-export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
+export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25, fadeSec = XFADE_SEC) {
   const onsets = bounds.map((seg) => seg.start / sampleRate);
   // 이 음절이 쓸 수 있는 재료 = 다음 음절 시작까지(사이의 숨·이음새 포함)
   const spans = bounds.map(
@@ -267,44 +313,28 @@ export function alignToBeats(bounds, sampleRate, beatSec, tailSec = 0.25) {
       Math.ceil(syllableSec / gridSec),
     );
     const allotted = units * gridSec;
+    const dur = Math.min(spans[i], allotted);
+    // 뒤 조각이 이 조각의 고원이 끝나는 시각에 바로 올라오는가. 배정 칸이 재료보다
+    // 길면(삽입 침묵) 그렇지 않고, 마지막 조각은 뒤가 없다 — 두 경우 모두 페이드
+    // 아웃을 재료 안에 둔다(chunkTiming의 주석에 이유가 있다).
+    const joinsNext = i + 1 < bounds.length && allotted - dur < 1e-9;
     placed.push({
       at,
       from: onsets[i],
-      dur: Math.min(spans[i], allotted),
+      dur,
+      joinsNext,
+      ...chunkTiming(dur, fadeSec, joinsNext),
       syllableSec,
       units,
     });
     at += allotted;
   }
-  return { placed, totalSec: at, gridSec };
-}
-
-// 원본에서도 배치에서도 이어지는 조각을 하나로 합친다.
-//
-// 왜 필요한가: `scheduleVoiceChunk`는 조각마다 페이드 인·아웃을 건다. 그런데 정렬된
-// 조각 중 다수는 **원본의 연속 구간이고 배치도 연속**이라, 그 이음매의 페이드는 아무
-// 이유 없이 진폭을 0까지 떨어뜨렸다 올린다 — 페이드 아웃 20 + 삽입 침묵 42 + 페이드
-// 인 20ms 동안 소리가 죽는다(실기 지적 "말이 살짝 끊긴다"의 절반). 합쳐 두면 페이드가
-// **실제로 침묵이 있는 자리에만** 남고, 그 자리는 쉼이라 원래 안전하다.
-//
-// 두 조건이 모두 성립할 때만 합치므로 합친 결과는 원본을 한 번 복사한 것과 같다 —
-// 소리가 달라질 여지가 없다. 재료를 건너뛴 경계(배정 칸이 재료보다 짧은 경우)는
-// 원본에서 불연속이므로 합치지 않는다.
-export function mergeContiguous(placed, epsilon = 1e-9) {
-  const merged = [];
-  for (const chunk of placed) {
-    const prev = merged[merged.length - 1];
-    const joinsInOutput = prev && Math.abs(prev.at + prev.dur - chunk.at) < epsilon;
-    const joinsInSource = prev && Math.abs(prev.from + prev.dur - chunk.from) < epsilon;
-    if (joinsInOutput && joinsInSource) {
-      prev.dur += chunk.dur;
-      prev.units += chunk.units;
-      prev.syllableSec += chunk.syllableSec;
-      continue;
-    }
-    merged.push({ ...chunk }); // 호출자의 배열을 변형하지 않는다
-  }
-  return merged;
+  // 마지막 조각은 뒤에 이어질 조각이 없어 페이드 아웃이 배정 칸 밖으로 나갈 수 있다.
+  // 그 꼬리까지 곡 길이에 넣어야 한다 — **이 값을 네 곳이 읽는다**(buildChantGraph,
+  // songSeconds, ui.js의 멜로디 음 개수 결정과 진단 칩). 스케줄러 쪽에서 fade를
+  // 더하면 나머지 세 곳이 조용히 20ms 틀리므로 생산자를 여기 하나로 둔다.
+  const last = placed[placed.length - 1];
+  return { placed, totalSec: last ? Math.max(at, last.at + last.readSec) : at, gridSec };
 }
 
 // 목소리를 먼저 정규화하고 그 위에서 멜로디 비율을 잡는다.
@@ -316,9 +346,31 @@ const VOICE_PEAK = 0.89; // 정규화 목표 피크
 const VOICE_GAIN_MAX = 8; // 무음·잡음만 있는 녹음을 증폭하지 않기 위한 상한
 // 정규화된 목소리 RMS 대비 멜로디 진폭. 실기 청취로 정했다(1 → 작다, 2.2 → 여전히
 // 작다, 3 → 적당). 배음을 얹어 지각 음량이 함께 올랐으므로 이 숫자만의 결과는 아니다.
+//
+// **단위 주의**: 이 값은 RMS 비가 아니라 **엔벨로프 피크 비**다. 실효 RMS로 환산하는
+// 계수는 피아노에서 0.396이다(정규화 파형 RMS 0.519 × level 1.2 × 엔벨로프·필터 0.635 —
+// 한 음 오프라인 렌더 실측). 즉 실효 음량을 정하는 세 번째 자리가 `createMelodyVoice`의
+// 엔벨로프·필터인데 거기엔 "level"이라는 이름이 없어 레벨 결정으로 세어지지 않는다.
+// 이 주석이 없어서 9차 진단이 +5.4dB로 출발했다(실제 +1.5dB).
 const MELODY_TO_VOICE = 3;
 
-export function mixLevels(samples, fromSample, lengthSamples, ratio = MELODY_TO_VOICE) {
+// biquad 저역통과(Q=1)가 차단 부근 성분을 키우는 몫. 프리셋 level과 곱해 클리핑 여유에
+// 들어간다.
+//
+// **음정에 따라 변한다** — 배음이 차단 주파수에 어떻게 앉는지에 달려 음이 올라갈수록
+// 커진다. 그래서 한 음에서 잰 값을 쓰면 안 된다. 처음 1.024(f0 311Hz = midi 51)를 썼다가
+// 리뷰 실측에서 높은 음이 든 절이 여전히 클리핑하는 것이 잡혔다(렌더 피크 1.03).
+//
+// 오프라인 렌더로 잰 `실제 파형 피크 / (melodyLevel × preset.level)`의 악기별 최댓값
+// (midi 48~72):  piano 1.255 · orgel 1.240 · marimba 1.242 · synth 1.166.
+// 전부를 덮는 1.26을 쓴다. 대가는 절대 음량 약 0.7dB이고, 그건 왜곡을 없애는 값이다.
+export const PRESET_RESONANCE = 1.26;
+
+// melodyPeakFactor: melodyLevel(엔벨로프 피크 게인)에서 실제 파형 피크로 가는 배수.
+// 기본 1은 "프리셋을 모른다"는 뜻이고, 챈트 경로는 preset.level × 공진을 넘긴다 —
+// 빼먹으면 melodyLevel > 0.14에서 최악 피크가 1을 넘어 exporter의 ±1 클램프에
+// 걸린다(실기 관측 melodyLevel 0.23~0.73이므로 사실상 항상).
+export function mixLevels(samples, fromSample, lengthSamples, ratio = MELODY_TO_VOICE, melodyPeakFactor = 1) {
   let sum = 0;
   let peak = 0;
   let n = 0;
@@ -336,27 +388,58 @@ export function mixLevels(samples, fromSample, lengthSamples, ratio = MELODY_TO_
   // 합이 1을 넘는 문제는 아래 마스터가 비율을 유지한 채 눌러서 해결한다.
   const melodyLevel = Math.min(1, Math.max(0.08, rms * voiceGain * ratio));
   // 정규화한 목소리 피크와 멜로디가 겹쳐도 1을 넘지 않게 눌러 둔다(비율은 유지)
-  const master = Math.min(1, 0.97 / (Math.min(VOICE_PEAK, peak * voiceGain) + melodyLevel));
+  const master = Math.min(
+    1,
+    0.97 / (Math.min(VOICE_PEAK, peak * voiceGain) + melodyLevel * melodyPeakFactor),
+  );
   return { voiceGain, melodyLevel, master };
 }
 
-const FADE_SEC = 0.02; // 조각 경계에서 딱 소리가 나지 않을 만큼만
-
-// 한 덩이의 목소리를 페이드 인·아웃으로 얹는다. 잘린 자리는 쉼 구간이므로
-// 이 페이드가 말을 건드리지 않는다.
-function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur, level) {
-  const fade = Math.min(FADE_SEC, dur / 3);
+// 한 덩이의 목소리를 얹는다.
+//
+// 페이드 아웃은 `dur` **이후**의 재료에 걸린다(chunkTiming의 readSec). 뒤 조각이
+// 정확히 `when + dur`에 0→level로 올라오므로 두 램프가 상보가 되어 합이 1로 유지되고,
+// 원본에서도 이어지는 경계라면 두 조각이 같은 샘플을 읽어 합이 원본과 정확히 같다.
+// 원본이 끊긴 경계에서도 진폭이 0에 닿지 않는다(실측: 경계 구간 RMS -1.1dB 상관
+// ~ -2.0dB 무상관. 예전에는 40ms 동안 0까지 떨어졌다).
+//
+// **선형 램프를 쓴다.** 등전력(√) 램프는 무상관 구간의 전력을 평탄하게 만드는 대신
+// 원본이 이어지는 경계에서 합을 최대 +3dB 밀어올려 "정확히 원본"을 깨뜨린다. 이음매
+// 정확성이 이 설계의 핵심 자산이다. psola.js의 xfade도 선형이라 리포 안에서 일관된다.
+function scheduleVoiceChunk(ctx, dest, buffer, { when, from, fadeSec, plateauSec, readSec, level }) {
   const gain = ctx.createGain();
+  // 기본값을 먼저 0으로 내린다. AudioParam은 **첫 automation 이벤트 이전 구간에
+  // intrinsic value(기본 1)를 쓴다** — 여기서는 소스가 첫 이벤트와 같은 시각에
+  // 시작하므로 도달할 수 없는 경로지만, 정수 샘플 경계에서 이벤트가 한 샘플 늦게
+  // 잡히면 그 한 샘플이 게인 1로 새고 조각이 겹치는 이음매에서 합이 2가 된다
+  // (Chrome 헤드리스에서 when이 정수 샘플일 때 실측 2.0). 한 줄짜리 보험이고,
+  // 서브샘플 start 반올림이 다를 수 있는 Safari가 실제 대상 브라우저다.
+  gain.gain.value = 0;
   gain.gain.setValueAtTime(0, when);
-  gain.gain.linearRampToValueAtTime(level, when + fade);
-  gain.gain.setValueAtTime(level, when + dur - fade);
-  gain.gain.linearRampToValueAtTime(0, when + dur);
+  gain.gain.linearRampToValueAtTime(level, when + fadeSec);
+  gain.gain.setValueAtTime(level, when + plateauSec); // 고원 끝 = 뒤 조각의 램프 시작
+  gain.gain.linearRampToValueAtTime(0, when + readSec);
   gain.connect(dest);
 
   const src = ctx.createBufferSource();
   src.buffer = buffer;
   src.connect(gain);
-  src.start(when, from, dur);
+  src.start(when, from, readSec);
+}
+
+// 라이드를 먹인 버퍼. 채널 수·길이·샘플레이트를 보존하므로 조각 오프셋(초)이 그대로
+// 유효하다 — alignToBeats·scheduleVoiceChunk·songSeconds는 라이드를 몰라도 된다.
+//
+// 분석은 채널 0으로 하고 게인은 전 채널에 같이 먹인다(좌우 균형이 어긋나지 않게).
+// 대가: **피크 보장이 채널 0에서만 성립한다** — 채널 1이 더 큰 스테레오 입력에서는
+// 그쪽이 자기 피크를 넘을 수 있다. mixLevels도 채널 0만 재므로 기존 설계와 일관되고,
+// 마이크 녹음은 사실상 모노다(recorder.js).
+function rideBuffer(ctx, audioBuffer, plan) {
+  const out = ctx.createBuffer(audioBuffer.numberOfChannels, audioBuffer.length, audioBuffer.sampleRate);
+  for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+    out.copyToChannel(applyRide(audioBuffer.getChannelData(c), plan), c);
+  }
+  return out;
 }
 
 // 챈트: 목소리를 자르지 않고 멜로디를 아래에 깐다.
@@ -367,17 +450,35 @@ function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur, level) {
 //   align=false        녹음을 통째로 흘려보낸다 — 박에 안 맞는 대신 완전히 자연스럽다
 function buildChantGraph(
   ctx,
-  { audioBuffer, bounds, melody, align = true, melodyRatio, melodyTone, instrument },
+  { audioBuffer, bounds, melody, align = true, melodyRatio, melodyTone, instrument, rideDb },
   startTime,
 ) {
   const { from, sec } = voiceSpan(audioBuffer, bounds);
   const sr = audioBuffer.sampleRate;
+  const preset = pickInstrument(instrument);
+  const samples = audioBuffer.getChannelData(0);
+  const fromSample = Math.round(from * sr);
+  const lengthSamples = Math.round(sec * sr);
+
+  // **순서가 계약이다: 균형은 원본에서 잰다.** 라이드된 샘플을 mixLevels에 넣으면
+  // rms가 올라가 melodyLevel이 함께 커진다 — 조용한 부분을 들리게 하려는 목적과
+  // 정반대다. 그래서 멜로디 레벨·마스터·프리셋은 라이드와 무관하게 결정된다.
+  //
+  // test/synth.test.mjs의 `멜로디 균형은 라이드 전 원본에서 재야 한다`가 그 **이유**를
+  // (뒤집으면 melodyLevel이 커진다는 것을) 증명하지만, 이 함수의 호출 순서 자체는
+  // 브라우저 경로라 node 테스트가 관측하지 못한다 — 여기 두 줄의 순서가 유일한 보장이다.
   const { voiceGain, melodyLevel, master: masterGain } = mixLevels(
-    audioBuffer.getChannelData(0),
-    Math.round(from * sr),
-    Math.round(sec * sr),
+    samples,
+    fromSample,
+    lengthSamples,
     melodyRatio,
+    preset.level * PRESET_RESONANCE,
   );
+
+  // 조용한 음절을 프레임 단위로 끌어올린다. 피크를 올리지 않으므로 위 클리핑 여유가
+  // 그대로 유효하고, 길이·인덱스를 보존하므로 아래 조각 오프셋도 그대로 쓴다.
+  const ride = ridePlan(samples, sr, fromSample, lengthSamples, { maxBoostDb: rideDb });
+  const voiceBuffer = ride.meanBoostDb > 0 ? rideBuffer(ctx, audioBuffer, ride) : audioBuffer;
 
   const master = ctx.createGain();
   master.gain.value = masterGain;
@@ -386,13 +487,24 @@ function buildChantGraph(
   let voiceSec = sec;
   if (align && bounds.length) {
     const { placed, totalSec } = alignToBeats(bounds, sr, 60 / melody.bpm);
-    // 이어지는 조각을 합쳐 불필요한 페이드를 없앤다 — 페이드는 침묵이 있는 자리에만 남는다
-    for (const chunk of mergeContiguous(placed)) {
-      scheduleVoiceChunk(ctx, master, audioBuffer, startTime + chunk.at, chunk.from, chunk.dur, voiceGain);
+    for (const chunk of placed) {
+      scheduleVoiceChunk(ctx, master, voiceBuffer, {
+        ...chunk,
+        when: startTime + chunk.at,
+        level: voiceGain,
+      });
     }
     voiceSec = totalSec;
   } else {
-    scheduleVoiceChunk(ctx, master, audioBuffer, startTime, from, sec, voiceGain);
+    // 통째로 흘려보내는 경로는 뒤에 이어질 조각이 없다 — joinsNext=false가 곧
+    // "페이드 아웃을 자기 재료 안에서 한다"이고, voiceSpan이 녹음 끝으로 클램프하므로
+    // 더 읽을 재료가 없을 수도 있다는 사정이 정렬 경로의 마지막 조각과 같다.
+    scheduleVoiceChunk(ctx, master, voiceBuffer, {
+      when: startTime,
+      from,
+      ...chunkTiming(sec, XFADE_SEC, false),
+      level: voiceGain,
+    });
   }
 
   const { noteTimes, endTime } = scheduleMelody(
@@ -401,7 +513,7 @@ function buildChantGraph(
     melody,
     startTime,
     melodyLevel,
-    pickInstrument(instrument),
+    preset,
     melodyTone,
   );
   return {
