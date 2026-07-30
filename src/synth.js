@@ -1,5 +1,6 @@
 import { midiToHz } from './composer.js';
 import { renderNote } from './psola.js';
+import { pickInstrument } from './instruments.js';
 
 // 마지막 음이 끝난 뒤 남기는 여유. 재생 길이 보고와 오프라인 렌더 버퍼 할당이
 // 같은 값을 써야 한다 — 따로 두면 한쪽만 고쳤을 때 꼬리가 잘린다.
@@ -111,57 +112,82 @@ function scheduleSegment(ctx, dest, buffer, seg, grain, voice, targetHz, when, n
   body.stop(when + sounding);
 }
 
-// 멜로디 악기의 배음 구성(기본음·2·3·4배음). 순수 사인파는 진폭이 같아도 말소리보다
-// 훨씬 작게 들린다 — 화자 음높이대(200~400Hz)에 에너지가 전부 몰려 있고 **귀가 가장
-// 민감한 1~3kHz 대역이 비기 때문**이다(실기 지적: "멜로디가 여전히 작다"). 배음을
-// 얹으면 진폭을 키우지 않고도 지각 음량이 올라간다. createPeriodicWave가 피크를
-// 정규화하므로 클리핑 계산(mixLevels)도 그대로 유효하다.
-// 실기 청취로 한 단계 더 올렸다(2·3배음 0.45·0.22 → 0.75·0.55, 5·6배음 추가).
-// tone으로 기본음 위 배음만 한꺼번에 조절한다 — 0이면 순수 사인파다.
-const MELODY_HARMONICS = [0, 1, 0.75, 0.55, 0.38, 0.24, 0.14];
-
-function melodyWave(ctx, tone = 1) {
-  const imag = Float32Array.from(MELODY_HARMONICS, (amp, i) =>
+// 배음 세기는 tone으로 한꺼번에 조절한다 — 0이면 순수 사인파다. 기본음(i<=1)은
+// 건드리지 않아야 tone을 올려도 음정과 기준 음량이 그대로 남는다.
+// createPeriodicWave가 피크를 정규화하므로 클리핑 계산(mixLevels)도 그대로 유효하다.
+function melodyWave(ctx, preset, tone = 1) {
+  const imag = Float32Array.from(preset.harmonics, (amp, i) =>
     i <= 1 ? amp : Math.min(1, amp * tone),
   );
   return ctx.createPeriodicWave(new Float32Array(imag.length), imag);
 }
 
-// 멜로디를 악기로 연주한다. 저역 삼각파 패드가 화자 음높이가 낮을 때 웅웅거려
-// 사용자가 "비프음"으로 들었으므로 저역통과로 거친 배음을 깎아 순하게 남긴다.
+// 필터가 목표 차단 주파수에 닿는 시점(음 길이 대비). 감쇠가 끝나기 전에 닿아야
+// 고배음이 "먼저" 죽은 것으로 들린다.
+const FILTER_SHARE = 0.5;
+
+// 멜로디 한 음. 감산 합성의 표준 순서(osc → 필터 → 게인)로 한 벌을 만든다.
+//
+// **샘플 내장(CC0 악기 녹음)으로 갈 때 교체할 지점이 여기다.** 프리셋의 octave·level·
+// 엔벨로프는 그대로 쓰이고 파형 생성만 AudioBufferSourceNode로 바뀐다.
+function createMelodyVoice(ctx, dest, { wave, preset, hz, when, durSec, level }) {
+  const osc = ctx.createOscillator();
+  osc.setPeriodicWave(wave);
+  osc.frequency.value = hz;
+
+  // 차단 주파수를 음이 울리는 동안 내린다 — **고배음이 기본음보다 먼저 죽는 것**이
+  // 피아노다움의 핵심이다. filterTo가 없는 프리셋은 고정 필터(예전 소리)다.
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(preset.filterFrom, when);
+  if (preset.filterTo !== undefined) {
+    filter.frequency.exponentialRampToValueAtTime(preset.filterTo, when + durSec * FILTER_SHARE);
+  }
+
+  // 엔벨로프 시각이 역순이면 스케줄이 꼬인다 — 짧은 음에서는 attackSec이
+  // durSec*holdShare보다 클 수 있으므로 순서를 산술로 보장한다.
+  const attackSec = Math.min(preset.attackSec, durSec * 0.25);
+  const holdSec = Math.max(attackSec, durSec * preset.holdShare);
+  const decaySec = Math.max(holdSec + 1e-3, durSec * 0.9);
+  const peak = level * preset.level;
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, when);
+  gain.gain.linearRampToValueAtTime(peak, when + attackSec);
+  if (holdSec > attackSec) gain.gain.setValueAtTime(peak, when + holdSec);
+  // exponentialRamp는 0에 닿을 수 없다 — 감쇠 목표는 0보다 커야 한다
+  gain.gain.exponentialRampToValueAtTime(Math.max(peak * preset.sustain, 1e-4), when + decaySec);
+  gain.gain.linearRampToValueAtTime(0, when + durSec);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(dest);
+  osc.start(when);
+  osc.stop(when + durSec);
+}
+
+// 멜로디를 악기로 연주한다. 악기 성격은 전부 프리셋 데이터가 정한다(src/instruments.js).
 //
 // 음 시각을 돌려주는 쪽이 이 함수다 — 화면 구슬이 이 시각을 그대로 쓴다.
-function scheduleMelody(ctx, dest, melody, startTime, level, tone) {
+// 음역은 프리셋의 octave로 옮기되 **melody.notes의 midi는 건드리지 않는다**:
+// 구슬 높이가 그 값을 쓰므로 함께 움직이면 화면과 소리가 어긋난다.
+function scheduleMelody(ctx, dest, melody, startTime, level, preset, tone) {
   const secPerBeat = 60 / melody.bpm;
-  const lowpass = ctx.createBiquadFilter();
-  lowpass.type = 'lowpass';
-  // 1400Hz로 막으면 배음이 통째로 잘려 다시 사인파가 된다. 3.5kHz까지 열어 두되
-  // 그 위는 깎는다 — 거친 고역이 남으면 예전의 "비프음" 인상으로 돌아간다.
-  lowpass.frequency.value = 3500;
-  lowpass.connect(dest);
-
-  const wave = melodyWave(ctx, tone);
+  const wave = melodyWave(ctx, preset, tone); // 프리셋당 한 번 — 음마다 만들면 낭비다
   const noteTimes = [];
   let when = startTime;
   for (const note of melody.notes) {
-    const noteSec = note.beats * secPerBeat;
+    const durSec = note.beats * secPerBeat;
     noteTimes.push(when);
-    const osc = ctx.createOscillator();
-    osc.setPeriodicWave(wave);
-    osc.frequency.value = midiToHz(note.midi);
-    const gain = ctx.createGain();
-    // 감쇠를 얕게 둔다(0.4배 → 0.75배). 목소리는 감쇠가 없으므로 깊게 감쇠하면
-    // 평균 음량이 목소리보다 훨씬 낮아져 "멜로디가 작다"로 들린다.
-    gain.gain.setValueAtTime(0, when);
-    gain.gain.linearRampToValueAtTime(level, when + 0.02);
-    gain.gain.setValueAtTime(level, when + noteSec * 0.6);
-    gain.gain.exponentialRampToValueAtTime(level * 0.75, when + noteSec * 0.9);
-    gain.gain.linearRampToValueAtTime(0, when + noteSec);
-    osc.connect(gain);
-    gain.connect(lowpass);
-    osc.start(when);
-    osc.stop(when + noteSec);
-    when += noteSec;
+    createMelodyVoice(ctx, dest, {
+      wave,
+      preset,
+      hz: midiToHz(note.midi + preset.octave * 12),
+      when,
+      durSec,
+      level,
+    });
+    when += durSec;
   }
   return { noteTimes, endTime: when };
 }
@@ -301,7 +327,7 @@ function scheduleVoiceChunk(ctx, dest, buffer, when, from, dur, level) {
 //   align=false        녹음을 통째로 흘려보낸다 — 박에 안 맞는 대신 완전히 자연스럽다
 function buildChantGraph(
   ctx,
-  { audioBuffer, bounds, melody, align = true, melodyRatio, melodyTone },
+  { audioBuffer, bounds, melody, align = true, melodyRatio, melodyTone, instrument },
   startTime,
 ) {
   const { from, sec } = voiceSpan(audioBuffer, bounds);
@@ -328,7 +354,15 @@ function buildChantGraph(
     scheduleVoiceChunk(ctx, master, audioBuffer, startTime, from, sec, voiceGain);
   }
 
-  const { noteTimes, endTime } = scheduleMelody(ctx, master, melody, startTime, melodyLevel, melodyTone);
+  const { noteTimes, endTime } = scheduleMelody(
+    ctx,
+    master,
+    melody,
+    startTime,
+    melodyLevel,
+    pickInstrument(instrument),
+    melodyTone,
+  );
   return {
     durationSec: Math.max(voiceSec, endTime - startTime) + TAIL_SEC,
     master,
@@ -356,7 +390,9 @@ export function buildGraph(ctx, spec, startTime = 0) {
   master.gain.value = 0.9;
   master.connect(ctx.destination);
 
-  if (pad) scheduleMelody(ctx, master, melody, startTime, 0.1, spec.melodyTone);
+  if (pad) {
+    scheduleMelody(ctx, master, melody, startTime, 0.1, pickInstrument(spec.instrument), spec.melodyTone);
+  }
 
   // 각 음이 언제 울리는지 함께 돌려준다. 화면에서 음절 구슬을 소리에 맞춰 켜려면
   // 이 시각이 필요하고, UI가 따로 계산하면 타이밍 로직이 두 곳으로 갈라진다.
