@@ -1,4 +1,4 @@
-import { sliceSyllables } from './slicer.js';
+import { sliceSyllables, coverQuietEdges } from './slicer.js';
 import { findGrain } from './pitch.js';
 import { findPitchMarks } from './psola.js';
 import { composeMelody, VERSE_LEN } from './composer.js';
@@ -56,7 +56,10 @@ const screens = { idle: el('screen-idle'), recording: el('screen-recording'), re
 
 // renderOffline에 이 객체를 그대로 넘긴다 — 필드를 골라 옮기면 재생과 저장이
 // 갈라진다. songUrl·songBlob·noteTimes는 렌더 결과 캐시(멜로디가 바뀌면 버린다).
-let session = null; // { audioBuffer, segments, grains, pitchMarks, transcript, bounds, rawCount, referenceHz, melody, voices, songUrl, songBlob, noteTimes }
+// bounds와 segments는 **다른 값이다**: bounds는 챈트 재생 범위(조용한 앞뒤를 흡수),
+// segments는 음정 이동·f0 분석용 음절 조각(슬라이서 원본). chunks는 원본 녹음들이고
+// 이어 녹음이 그것을 매번 다시 넘긴다 — 자세한 근거는 analyze와 finishSession에 있다.
+let session = null; // { audioBuffer, chunks, segments, grains, pitchMarks, transcript, bounds, rawCount, referenceHz, melody, voices, songUrl, songBlob, noteTimes }
 let seed = 1;
 let handle = null;
 let player = null;
@@ -211,7 +214,8 @@ function drawWaveform(samples, segments) {
   ctx.stroke();
   ctx.globalAlpha = 1;
 
-  // 음절 경계 — 어디서 잘렸는지가 곧 음이 몇 개인지다
+  // 음절 경계 — 어디서 잘렸는지가 곧 음이 몇 개인지다. 첫·마지막 선은 슬라이서가 자른
+  // 자리가 아니라 **재생 범위의 끝**이다(coverQuietEdges가 조용한 발화까지 넓혔다).
   ctx.strokeStyle = COLOR.voice;
   for (const seg of segments) {
     for (const pos of [seg.start, seg.end]) {
@@ -269,7 +273,9 @@ function renderSpec() {
   };
 }
 
-function analyze(audioBuffer, transcript) {
+// chunks는 **원본 녹음들**이다(레벨을 맞추기 전, 이어붙이기 전). 다음 이어 녹음이
+// 이것을 그대로 다시 넘겨야 레벨 맞추기가 멱등이다 — finishSession의 주석에 근거가 있다.
+function analyze(audioBuffer, transcript, chunks) {
   const samples = audioBuffer.getChannelData(0);
   const sampleRate = audioBuffer.sampleRate;
   const found = sliceSyllables(samples, sampleRate);
@@ -290,14 +296,22 @@ function analyze(audioBuffer, transcript) {
   const voiced = grains.filter(Boolean).map((g) => g.f0).sort((a, b) => a - b);
   const referenceHz = voiced.length ? voiced[Math.floor(voiced.length / 2)] : null;
   // 그리기는 여기서 하지 않는다 — 결과 화면이 아직 hidden이라 캔버스 크기가 0이다.
+  //
   // bounds는 정규화 전 경계다(반복으로 채운 조각은 같은 선을 두 번 그리게 된다).
+  // 그리고 **챈트의 재생 범위이기도 하다** — 조각 밖에 남은 조용한 발화를 양 끝에서
+  // 흡수한 값이고, 근거는 slicer.coverQuietEdges에 있다. 확장은 여기 한 곳에서만 한다:
+  // bounds를 읽는 모두가 같은 범위를 봐야 하고, 소비자마다 확장하면 갈라진다.
+  //
+  // segments(f0·피치 마크·음정 이동)는 확장하지 않은 found에서 나온다. **두 값이 다르다는
+  // 것이 이 함수의 계약이다** — segments는 리듬 단위, bounds는 재생 범위다.
   return {
     audioBuffer,
+    chunks,
     segments,
     grains,
     pitchMarks,
     transcript,
-    bounds: found,
+    bounds: coverQuietEdges(samples, sampleRate, found),
     rawCount: found.length,
     referenceHz,
   };
@@ -640,16 +654,20 @@ async function finishSession() {
   // 이어붙이기: 기존 목소리 뒤에 무음을 두고 새 녹음을 잇는다. **전체를 다시 분석한다** —
   // 조각 경계를 오프셋만 옮겨 합치면 이음매의 음절이 두 규칙(예전 분석/새 분석)으로
   // 갈라지고, 슬라이서의 임계값이 최대 프레임 기준이라 붙인 뒤의 값이 달라진다.
+  //
+  // **원본 녹음을 그대로 모아 매번 전부 넘긴다.** 이어붙인 결과에 새 녹음만 붙여 다시
+  // 부르면 joinSamples의 레벨 맞추기가 이미 맞춰진 재료에 또 적용돼 상한이 곱해진다
+  // (실측: 세 번 이어 붙이면 첫 녹음이 원본의 64배 — matchLevels의 주석에 근거가 있다).
   const prev = appendNext && session ? session : null;
   appendNext = false;
+  const fresh = recording.audioBuffer.getChannelData(0);
+  let chunks = [fresh];
   let buffer = recording.audioBuffer;
   let transcript = recording.transcript;
   if (prev) {
     const sr = prev.audioBuffer.sampleRate;
-    const joined = joinSamples(
-      [prev.audioBuffer.getChannelData(0), recording.audioBuffer.getChannelData(0)],
-      sr,
-    );
+    chunks = [...prev.chunks, fresh];
+    const joined = joinSamples(chunks, sr);
     if (joined.length / sr > MAX_TOTAL_SEC) {
       setNotice(`노래가 ${MAX_TOTAL_SEC}초를 넘어요. 저장한 뒤 새로 시작해 주세요.`);
       showResult();
@@ -659,7 +677,7 @@ async function finishSession() {
     transcript = [prev.transcript, recording.transcript].filter(Boolean).join(' ');
   }
 
-  const analyzed = analyze(buffer, transcript);
+  const analyzed = analyze(buffer, transcript, chunks);
   if (!analyzed) {
     setNotice('소리가 너무 작아요. 조금 더 크게 말해 주세요.');
     // 이어붙이기가 실패해도 앞서 만든 노래는 남긴다 — 처음 녹음일 때만 첫 화면으로

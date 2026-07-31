@@ -195,7 +195,11 @@ function scheduleMelody(ctx, dest, melody, startTime, level, preset, tone) {
 
 // 녹음에서 목소리가 실제로 있는 구간. 앞뒤 침묵만 잘라내고 **음절 사이는 건드리지
 // 않는다** — 조각을 잘라 이어붙이면 그 사이의 자연스러운 이음새가 사라져 말이
-// 뚝뚝 끊긴다(실기 지적). 챈트 렌더와 화면이 같은 값을 봐야 하므로 여기 한 곳에서만 정한다.
+// 뚝뚝 끊긴다(실기 지적).
+//
+// 범위의 **끝**은 bounds가 이미 정해서 온다(slicer.coverQuietEdges가 조각 밖의 조용한
+// 발화를 양 끝에서 흡수한다). 여기서는 그것을 초 단위 span으로 파생할 뿐이고, 파생을
+// 한 곳에 두는 이유는 챈트 렌더와 화면이 같은 값을 봐야 하기 때문이다.
 export function voiceSpan(audioBuffer, bounds) {
   const sr = audioBuffer.sampleRate;
   if (!bounds || bounds.length === 0) return { from: 0, sec: audioBuffer.duration };
