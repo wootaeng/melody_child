@@ -174,6 +174,65 @@ test('조각 앞의 충격음을 흡수하지 않는다 (voiceGain 보호)', () 
   assert.ok(peak < 0.5, `재생 범위가 충격음(피크 ${peak.toFixed(2)})을 삼켰다`);
 });
 
+// 숨소리·바람소리는 확장이 노리는 조용한 발화와 **같은 레벨대**에 있다(12차 실기:
+// "사라지는 말은 없어졌는데 잡음이 붙는다"). 갈라지는 축은 레벨이 아니라 스펙트럼이고,
+// 여기서는 제로 크로싱 비율로 본다.
+
+// 고역 치우친 광대역 잡음 = 숨소리·마찰음
+function breath(n, amp) {
+  let seed = 11;
+  let prev = 0;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const x = seed / 0x3fffffff - 1;
+    out[i] = amp * (x - prev) * 0.7;
+    prev = x;
+  }
+  return out;
+}
+
+test('말끝 뒤의 숨소리를 흡수하지 않는다', () => {
+  const n = Math.round(1.2 * SR);
+  const s = noisy(n);
+  for (let i = 0; i < Math.round(0.4 * SR); i++) {
+    s[Math.round(0.1 * SR) + i] += 0.5 * Math.sin((2 * Math.PI * 220 * i) / SR);
+  }
+  // 말이 끝나고 60ms 뒤 숨소리 300ms — 조용한 끝음절과 같은 레벨(0.05)이다
+  const breathFrom = Math.round(0.56 * SR);
+  const puff = breath(Math.round(0.3 * SR), 0.05);
+  for (let i = 0; i < puff.length; i++) s[breathFrom + i] += puff[i];
+
+  const found = sliceSyllables(s, SR);
+  const covered = coverQuietEdges(s, SR, found);
+  assert.ok(
+    covered.at(-1).end <= breathFrom + Math.round(0.06 * SR),
+    `숨소리를 ${(((covered.at(-1).end - breathFrom) / SR) * 1000).toFixed(0)}ms 삼켰다`,
+  );
+});
+
+test('같은 레벨이어도 모음이면 흡수한다 (숨소리와 갈라진다)', () => {
+  // 위 테스트와 같은 배치인데 뒤가 숨소리가 아니라 조용한 모음이다. 레벨로만 판단하면
+  // 두 경우를 구분할 수 없다 — 이 테스트가 초록이어야 잡음 제거가 발화를 죽이지 않는다.
+  const n = Math.round(1.2 * SR);
+  const s = noisy(n);
+  for (let i = 0; i < Math.round(0.4 * SR); i++) {
+    s[Math.round(0.1 * SR) + i] += 0.5 * Math.sin((2 * Math.PI * 220 * i) / SR);
+  }
+  const tailFrom = Math.round(0.56 * SR);
+  const tailTo = tailFrom + Math.round(0.2 * SR);
+  for (let i = tailFrom; i < tailTo; i++) {
+    const ph = (2 * Math.PI * 200 * (i - tailFrom)) / SR;
+    s[i] += (0.05 * (Math.sin(ph) + 0.5 * Math.sin(2 * ph))) / 1.5;
+  }
+  const found = sliceSyllables(s, SR);
+  const covered = coverQuietEdges(s, SR, found);
+  assert.ok(
+    covered.at(-1).end >= tailTo - Math.round(0.04 * SR),
+    `조용한 모음이 ${(((tailTo - covered.at(-1).end) / SR) * 1000).toFixed(0)}ms 잘렸다`,
+  );
+});
+
 test('한 방향 확장에 상한이 있다', () => {
   // 바닥 추정이 틀리는 녹음에서도 피해를 상한으로 묶는다.
   const { samples } = edgeSample({ quietSec: 1.5, quiet: 0.06, loud: 0.5 });

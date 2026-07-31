@@ -47,6 +47,10 @@ const melodyTone = urlParams.has('tone') && Number(urlParams.get('tone')) >= 0
 const rideDb = urlParams.has('ride') && Number.isFinite(Number(urlParams.get('ride')))
   ? Math.max(0, Number(urlParams.get('ride')))
   : undefined;
+// 조각 밖의 조용한 발화를 재생 범위에 넣을지. `?cover=0`이면 12차 이전처럼 슬라이서가
+// 잡은 조각만 재생한다 — 실기에서 "잡음이 붙는다"의 원인이 이 확장인지(cover=0으로
+// 사라지면 그렇다) 라이드인지(`?ride=0`) 가르는 A/B다.
+const covering = urlParams.get('cover') !== '0';
 // 멜로디 악기. URL로 기본값을 정하고 화면 버튼으로 바꾼다 — 아이폰에서 주소를
 // 고치지 않고 A/B할 수 있어야 실기 청취가 굴러간다.
 let instrument = INSTRUMENTS[urlParams.get('inst')] ? urlParams.get('inst') : DEFAULT_INSTRUMENT;
@@ -304,6 +308,7 @@ function analyze(audioBuffer, transcript, chunks) {
   //
   // segments(f0·피치 마크·음정 이동)는 확장하지 않은 found에서 나온다. **두 값이 다르다는
   // 것이 이 함수의 계약이다** — segments는 리듬 단위, bounds는 재생 범위다.
+  const bounds = covering ? coverQuietEdges(samples, sampleRate, found) : found;
   return {
     audioBuffer,
     chunks,
@@ -311,7 +316,13 @@ function analyze(audioBuffer, transcript, chunks) {
     grains,
     pitchMarks,
     transcript,
-    bounds: coverQuietEdges(samples, sampleRate, found),
+    bounds,
+    // 확장이 실제로 얼마나 먹었는지. 폰에서는 콘솔을 볼 수 없으므로 진단 칩으로 읽는다 —
+    // "잡음이 붙는다"가 이 숫자와 함께 와야 원인을 좁힐 수 있다.
+    coverMs: {
+      head: ((found[0].start - bounds[0].start) / sampleRate) * 1000,
+      tail: ((bounds[bounds.length - 1].end - found[found.length - 1].end) / sampleRate) * 1000,
+    },
     rawCount: found.length,
     referenceHz,
   };
@@ -459,6 +470,13 @@ function diagnostics() {
     facts.push(
       `라이드 +${ride.meanBoostDb.toFixed(1)}dB` +
         (ride.meanBoostDb > 0 ? ` (${Math.round(ride.spreadBeforeDb)}→${Math.round(ride.spreadAfterDb)})` : ''),
+    );
+    // 확장이 조각 밖에서 끌어온 양. 잡음이 들린다면 이 숫자가 클 것이고, 0인데도
+    // 들린다면 원인은 확장이 아니라 라이드나 녹음 자체다.
+    facts.push(
+      covering
+        ? `확장 ${Math.round(session.coverMs.head)}/${Math.round(session.coverMs.tail)}ms`
+        : '확장 꺼짐',
     );
     if (aligned && session.bounds.length) {
       const { totalSec, gridSec } = alignToBeats(

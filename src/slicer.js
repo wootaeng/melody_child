@@ -131,6 +131,30 @@ export const COVER_FLOOR_RATIO = 0.04;
 // 묶는다 — 상한이 없으면 녹음 전체가 재생 범위가 된다.
 const COVER_MAX_MS = 400;
 
+// 흡수를 멈추는 제로 크로싱 비율(초당 부호 변화). 레벨만으로는 숨소리를 발화와 구분할
+// 수 없다 — 12차 실기 판정이 "사라지는 말은 없어졌는데 숨소리·바람소리가 붙는다"였고,
+// 그 둘은 확장이 노리는 조용한 발화와 **같은 레벨대**에 있다.
+//
+// 구분되는 축은 스펙트럼이다. 유성음은 f0의 두 배 근처(사람 목소리 80~400Hz →
+// 160~800)에 머물고 마찰성 잡음은 광대역이라 한 자릿수 이상 벌어진다.
+//
+// **재기 전에 저역통과를 건다**(COVER_ZCR_LP_HZ). 원신호로 재면 룸톤의 고역 성분이
+// 교차를 만들어 **조용한 발화일수록 값이 올라간다** — 그게 곧 이 확장이 노리는 대상이라
+// 가드가 목표를 죽인다. 실측(룸톤 0.003 섞은 프레임, 초당 교차 / 원본 → 저역통과 후):
+//   모음 0.50  1,885 → 395     모음 0.05  4,105 → 755     모음 0.02  5,780 → 1,285
+//   숨소리     31,855 → 24,545                 룸톤만     23,915 → 8,725
+// 저역통과 후에는 아무리 조용한 모음도 1,285에 머물고 숨소리는 24,545다. 룸톤만 있는
+// 프레임(8,725)도 함께 걸러지는 것은 덤이다 — 확장 폭주를 한 겹 더 막는다.
+//
+// **대가**: 조각 밖의 무성 자음(어두 "ㅅ", 말끝 종성 파열)도 함께 걸러진다 — 숨소리와
+// 같은 축에 있어 이 지표로는 갈라지지 않는다. 조각 **안**은 손대지 않으므로 대부분의
+// 무성 자음은 영향받지 않고(뒤에 모음이 붙어 조각에 들어온다), 남는 손실은 발화 바깥에
+// 홀로 선 무성음뿐이다. 숨소리가 곡에 실리는 것보다 낫다고 보고 택했다.
+const COVER_MAX_ZCR = 2500;
+// ZCR을 재기 전에 거는 1차 저역통과의 차단 주파수. 음성의 f0·F1이 남고 잡음의 고역이
+// 빠지는 자리다(위 실측표가 이 값으로 잰 것이다).
+const COVER_ZCR_LP_HZ = 1000;
+
 // 이만큼 조용한 구간을 건너 소리를 찾는다. 슬라이서의 minGap(60ms, "음절이 끊겼다")을
 // 쓰면 안 된다 — 여기서 정하는 것은 음절 경계가 아니라 **같은 발화인가**이고, 어절
 // 사이 쉼(실측 100~200ms)이 60ms를 넘어 확장이 거기서 멈춘다(실측: 마지막 조각 뒤
@@ -186,6 +210,8 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
     floorRatio = COVER_FLOOR_RATIO,
     gapMs = COVER_GAP_MS,
     maxMs = COVER_MAX_MS,
+    maxZcr = COVER_MAX_ZCR,
+    zcrLowpassHz = COVER_ZCR_LP_HZ,
   } = opts;
   if (!bounds || bounds.length === 0) return bounds;
 
@@ -215,6 +241,30 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
     }
     return p;
   };
+  // 프레임의 초당 제로 크로싱 수(저역통과 후). 숨소리·마찰음은 발화와 레벨이 겹치지만
+  // 여기서 갈린다. 필터는 프레임마다 새로 돌리되 앞쪽 5ms로 상태를 데운다 — 1차 IIR의
+  // 시정수가 0.16ms이라 그것으로 충분하고, 신호 전체를 복사하지 않아도 된다.
+  const lpAlpha = Math.exp((-2 * Math.PI * zcrLowpassHz) / sampleRate);
+  const warmup = Math.round(sampleRate * 0.005);
+  const frameZcr = (f) => {
+    const from = f * hop;
+    const to = Math.min(samples.length, from + hop);
+    if (to <= from) return 0;
+    let y = 0;
+    for (let i = Math.max(0, from - warmup); i < from; i++) y = lpAlpha * y + (1 - lpAlpha) * samples[i];
+    let prev = y;
+    let crossings = 0;
+    for (let i = from; i < to; i++) {
+      y = lpAlpha * y + (1 - lpAlpha) * samples[i];
+      if ((prev < 0) !== (y < 0)) crossings++;
+      prev = y;
+    }
+    return (crossings * sampleRate) / (to - from);
+  };
+  // 흡수할 소리인가. 임계를 넘되 마찰성이 아니어야 한다. 마찰성 프레임은 **조용한
+  // 프레임과 같이 취급한다**(멈추지 않고 quiet를 쌓는다) — 짧은 숨소리 너머에 발화가
+  // 있으면 그것은 여전히 찾아야 하고, 길게 이어지면 gap 규칙이 알아서 멈춘다.
+  const isSpeech = (f) => frames[f] >= threshold && frameZcr(f) <= maxZcr;
   // 조각 안의 피크. 조각 밖에 이보다 큰 소리가 있다면 그것은 발화가 아니다 —
   // 발화였다면 슬라이서가 (더 높은 임계값으로도) 조각으로 잡았을 것이다.
   const insidePeak = (seg) => {
@@ -231,7 +281,7 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
   const startLimit = Math.max(0, Math.floor(first.start / hop) - maxFrames);
   for (let f = Math.floor(first.start / hop) - 1; f >= startLimit; f--) {
     if (framePeak(f) > startCeiling) break;
-    if (frames[f] >= threshold) {
+    if (isSpeech(f)) {
       quiet = 0;
       start = f * hop;
     } else if (++quiet >= gapFrames) break;
@@ -243,7 +293,7 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
   const endLimit = Math.min(frames.length, Math.ceil(last.end / hop) + maxFrames);
   for (let f = Math.ceil(last.end / hop); f < endLimit; f++) {
     if (framePeak(f) > endCeiling) break;
-    if (frames[f] >= threshold) {
+    if (isSpeech(f)) {
       quiet = 0;
       // 마지막 프레임까지 소리가 이어졌으면 프레임을 이루지 못한 나머지 샘플도 그
       // 발화의 일부다 — 여기서 20ms를 또 버리면 고치려던 증상이 그만큼 남는다.
