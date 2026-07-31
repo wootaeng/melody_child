@@ -105,43 +105,23 @@ export function sliceSyllables(samples, sampleRate, opts = {}) {
   return [];
 }
 
-// 재생 범위로 인정하는 바닥. 최대 프레임의 -20dB이고, 슬라이서 임계(-14dB)보다 6dB만
-// 낮다 — 흡수할 수 있는 창이 그만큼 좁다는 뜻이고, 그것이 이 기능의 실질적 한계다.
+// 재생 범위로 인정하는 바닥(최대 프레임의 -20dB). 슬라이서 임계(-14dB)보다 6dB만 낮다 —
+// 흡수할 수 있는 창이 그만큼 좁다는 것이 이 기능의 실질적 한계다.
 //
-// **-34dB → -28dB → -20dB로 두 번 올렸다. 두 번 다 실기·실측이 강제했다.**
+// **레벨이 유일한 판별 축이다.** 잡음과 조용한 발화의 레벨 실측(크게 말한 발화 대비):
+//   끝음절 -14.9 · 조사 -18.4 · 바람 럼블 -20.1 · 숨소리 입으로 -23.7 · 코로 -28.5 · 룸톤 -42.3
+// -20dB이 그 사이를 지나는 유일한 자리다. 여유가 1.6dB뿐이라 이보다 조용한 발화는 놓치고,
+// 되찾으려 내리면 숨소리가 함께 돌아온다(제로섬 — 실기가 잡음 쪽을 더 싫어했다).
+// 마이크에 가까운 강한 숨소리(-17.6dB)는 발화 레벨대라 원리적으로 못 막는다.
 //
-// ⑴ -34dB에서는 룸톤이 임계를 넘어 확장이 녹음 전체로 폭주했다(실측: 룸톤 -50dBFS·목소리
-// 피크 0.10인 조용한 녹음의 프레임 SNR이 -34dB → 앞 1.2초·뒤 1.0초를 전부 흡수, 곡이
-// 증폭된 룸톤으로 시작하고 길이 2.9배). 발동 조건이 "조용히 말한 녹음"이라 고치려던
-// 사용자와 정확히 겹쳤다.
+// -34 → -28 → -20dB로 두 번 올렸고, 제로 크로싱 비율로 스펙트럼을 보려던 시도는 픽스처
+// 교정 오류로 무동작이어서 되돌렸다. 두 이야기의 실측 근거는 설계 문서의 "재생 범위"
+// 절에 있다 — 이 값을 다시 만지려면 그것을 먼저 읽을 것.
 //
-// ⑵ -28dB에서 12차 실기 판정이 "사라지는 말은 없어졌는데 숨소리·바람소리가 붙는다"였다.
-// 잡음과 조용한 발화의 레벨 실측(크게 말한 발화 대비):
-//   조용한 끝음절 -14.9dB · 아주 조용한 조사 -18.4dB · 숨소리(입으로) -23.7dB
-//   숨소리(코로) -28.5dB · 바람 럼블 -20.1dB · 룸톤 -42.3dB
-// -20dB이 그 사이를 지나는 유일한 자리다. **여유가 1.6dB뿐이라 이보다 조용한 발화는
-// 놓친다** — 그것을 되찾으려고 바닥을 내리면 숨소리가 함께 돌아온다. 제로섬이고,
-// 실기 판정이 잡음 쪽을 더 싫어했다.
-//
-// 남는 구멍: **마이크에 가까운 강한 숨소리(-17.6dB)는 발화 레벨대에 들어와 걸러지지
-// 않는다.** 레벨로는 원리적으로 갈 수 없는 곳이다.
-//
-// **제로 크로싱 비율로 스펙트럼을 보려던 시도는 실패했다(되돌렸다).** 합성 픽스처에서
-// 모음 395 vs 숨소리 24,545로 갈리는 것처럼 보였지만, 그 픽스처(백색잡음 1차 차분)의
-// ZCR이 32,400/s로 **실제 무성 마찰음(3,000~5,000/s)의 6~10배**였다. 성도를 통과한
-// 현실적 숨소리로 재측정하니 가드를 켠 것과 끈 것이 비트 단위로 같았고(흡수량 360ms
-// 동일), 저역통과는 바람·럼블의 판별 근거인 고역을 걷어내 무조건 통과시켰다. 대신
-// 어두 자음(ㅅ·ㅊ)이 조용한 시작에서 120ms 통째로 사라졌다 — 이득 0, 대가 실재.
-// **교훈: 판별 지표를 도입할 때 픽스처의 교정을 먼저 문헌값과 맞춰야 한다.**
-//
-// **leveler의 RIDE_FLOOR_DB(-32dB)와 짝이다**: 이 함수는 소리를 재생 범위에 넣는 데까지고,
-// 실제로 들리게 만드는 것은 라이드다. 둘은 기준계가 달라 산술로 묶을 수 없으니(여기는
-// 최대 프레임 기준, 라이드는 유성 90분위 기준) 한쪽을 만질 때 다른 쪽을 함께 봐야 한다.
-//
-// 이 값이 슬라이서의 최종 재시도 임계(0.2 × 0.0625 = 0.0125)보다 높다는 점은 의도다:
-// 충격음이 최대 프레임을 정해 RETRY_FACTORS로 구제된 녹음에서는 확장이 검출보다 엄격해
-// 과소 흡수 쪽으로 틀린다 — 아래 피크 가드와 같은 방향의 보수성이다.
-export const COVER_FLOOR_RATIO = 0.1;
+// leveler의 RIDE_FLOOR_DB(-32dB)와 짝이다: 여기는 소리를 재생 범위에 넣는 데까지고 실제로
+// 들리게 만드는 것은 라이드다. 기준계가 달라(여기는 최대 프레임, 라이드는 유성 90분위)
+// 산술로 묶을 수 없으니 한쪽을 만질 때 다른 쪽을 함께 봐야 한다.
+const COVER_FLOOR_RATIO = 0.1;
 
 // 한 방향으로 흡수할 수 있는 최대 길이. 실측된 손실이 앞 240ms·뒤 161~353ms였으므로
 // 그것을 덮되, 바닥 추정이 틀렸을 때(룸톤이 임계를 넘는 저SNR 녹음) 피해를 이 값으로
@@ -198,15 +178,10 @@ const COVER_GAP_MS = 300;
 // 조각 사이는 건드리지 않는다: 확장이 이웃과 겹치면 조각을 병합하거나 경계를 옮겨야
 // 하고, 그러면 온셋(=박에 맞출 지점)이 줄어 정렬이 거칠어진다.
 export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
-  const {
-    hopMs = HOP_MS,
-    floorRatio = COVER_FLOOR_RATIO,
-    gapMs = COVER_GAP_MS,
-    maxMs = COVER_MAX_MS,
-  } = opts;
+  const { floorRatio = COVER_FLOOR_RATIO, gapMs = COVER_GAP_MS, maxMs = COVER_MAX_MS } = opts;
   if (!bounds || bounds.length === 0) return bounds;
 
-  const hop = Math.max(1, Math.round((sampleRate * hopMs) / 1000));
+  const hop = Math.max(1, Math.round((sampleRate * HOP_MS) / 1000));
   const frames = frameRms(samples, hop);
   if (frames.length === 0) return bounds;
   let peak = 0;
@@ -214,8 +189,8 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
   if (peak <= 1e-6) return bounds;
 
   const threshold = peak * floorRatio;
-  const gapFrames = Math.max(1, Math.round(gapMs / hopMs));
-  const maxFrames = Math.max(1, Math.round(maxMs / hopMs));
+  const gapFrames = Math.max(1, Math.round(gapMs / HOP_MS));
+  const maxFrames = Math.max(1, Math.round(maxMs / HOP_MS));
 
   const first = bounds[0];
   const last = bounds[bounds.length - 1];
@@ -225,26 +200,17 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
   // 그렇게 들어온 충격음의 피크를 mixLevels가 목소리 피크로 오인해 voiceGain이 무너진다
   // (리뷰 실측: 첫 조각 앞 20ms 지점의 진폭 0.9 탭 소리 하나로 목소리 11.1배 → 1.0배,
   // 실효 -14.3dB. 목소리가 조용할수록 나빠져 피크 0.05에서 -18.1dB).
-  const framePeak = (f) => {
+  const peakBetween = (from, to) => {
     let p = 0;
-    for (let i = f * hop; i < Math.min(samples.length, (f + 1) * hop); i++) {
+    for (let i = Math.max(0, from); i < Math.min(samples.length, to); i++) {
       p = Math.max(p, Math.abs(samples[i]));
     }
     return p;
   };
-  // 흡수할 소리인가. 12차 실기에서 숨소리·바람소리가 붙는다는 판정을 받아 **레벨로**
-  // 가른다(COVER_FLOOR_RATIO의 주석에 근거와 한계가 있다). 제로 크로싱 비율로 스펙트럼을
-  // 보려 한 시도는 실패했다 — 그 기록도 같은 주석에 있다.
-  const isSpeech = (f) => frames[f] >= threshold;
+  const framePeak = (f) => peakBetween(f * hop, (f + 1) * hop);
   // 조각 안의 피크. 조각 밖에 이보다 큰 소리가 있다면 그것은 발화가 아니다 —
   // 발화였다면 슬라이서가 (더 높은 임계값으로도) 조각으로 잡았을 것이다.
-  const insidePeak = (seg) => {
-    let p = 0;
-    for (let i = Math.max(0, seg.start); i < Math.min(samples.length, seg.end); i++) {
-      p = Math.max(p, Math.abs(samples[i]));
-    }
-    return p;
-  };
+  const insidePeak = (seg) => peakBetween(seg.start, seg.end);
 
   let start = first.start;
   let quiet = 0;
@@ -252,7 +218,7 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
   const startLimit = Math.max(0, Math.floor(first.start / hop) - maxFrames);
   for (let f = Math.floor(first.start / hop) - 1; f >= startLimit; f--) {
     if (framePeak(f) > startCeiling) break;
-    if (isSpeech(f)) {
+    if (frames[f] >= threshold) {
       quiet = 0;
       start = f * hop;
     } else if (++quiet >= gapFrames) break;
@@ -264,7 +230,7 @@ export function coverQuietEdges(samples, sampleRate, bounds, opts = {}) {
   const endLimit = Math.min(frames.length, Math.ceil(last.end / hop) + maxFrames);
   for (let f = Math.ceil(last.end / hop); f < endLimit; f++) {
     if (framePeak(f) > endCeiling) break;
-    if (isSpeech(f)) {
+    if (frames[f] >= threshold) {
       quiet = 0;
       // 마지막 프레임까지 소리가 이어졌으면 프레임을 이루지 못한 나머지 샘플도 그
       // 발화의 일부다 — 여기서 20ms를 또 버리면 고치려던 증상이 그만큼 남는다.
