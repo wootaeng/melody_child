@@ -178,17 +178,37 @@ test('조각 앞의 충격음을 흡수하지 않는다 (voiceGain 보호)', () 
 // "사라지는 말은 없어졌는데 잡음이 붙는다"). 갈라지는 축은 레벨이 아니라 스펙트럼이고,
 // 여기서는 제로 크로싱 비율로 본다.
 
-// 고역 치우친 광대역 잡음 = 숨소리·마찰음
-function breath(n, amp) {
+// 성도를 통과한 숨소리 = 대역 잡음(2차 대역통과). **백색잡음의 1차 차분을 쓰면 안 된다**
+// — 그 신호의 ZCR이 32,400/s로 실제 무성 마찰음(3,000~5,000/s)의 6~10배라, 그것으로
+// 교정한 판별 지표가 현실에서 무동작이었다(12차에 되돌린 ZCR 가드). 픽스처의 교정이
+// 곧 판정의 신뢰도다.
+function breath(n, amp, centerHz = 1500, q = 1.2) {
   let seed = 11;
-  let prev = 0;
+  const w = (2 * Math.PI * centerHz) / SR;
+  const alpha = Math.sin(w) / (2 * q);
+  const b0 = alpha;
+  const b2 = -alpha;
+  const a0 = 1 + alpha;
+  const a1 = -2 * Math.cos(w);
+  const a2 = 1 - alpha;
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
   const out = new Float32Array(n);
+  let peak = 0;
   for (let i = 0; i < n; i++) {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
     const x = seed / 0x3fffffff - 1;
-    out[i] = amp * (x - prev) * 0.7;
-    prev = x;
+    const y = (b0 * x + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+    x2 = x1;
+    x1 = x;
+    y2 = y1;
+    y1 = y;
+    out[i] = y;
+    if (Math.abs(y) > peak) peak = Math.abs(y);
   }
+  for (let i = 0; i < n; i++) out[i] *= amp / (peak || 1);
   return out;
 }
 
@@ -198,7 +218,8 @@ test('말끝 뒤의 숨소리를 흡수하지 않는다', () => {
   for (let i = 0; i < Math.round(0.4 * SR); i++) {
     s[Math.round(0.1 * SR) + i] += 0.5 * Math.sin((2 * Math.PI * 220 * i) / SR);
   }
-  // 말이 끝나고 60ms 뒤 숨소리 300ms — 조용한 끝음절과 같은 레벨(0.05)이다
+  // 말이 끝나고 60ms 뒤 입으로 내쉬는 숨 300ms. 발화 대비 -23.7dB로, 조용한 조사
+  // (-18.4dB)와 5dB밖에 차이가 없다 — 바닥이 그 사이를 지나야 한다.
   const breathFrom = Math.round(0.56 * SR);
   const puff = breath(Math.round(0.3 * SR), 0.05);
   for (let i = 0; i < puff.length; i++) s[breathFrom + i] += puff[i];
@@ -209,11 +230,40 @@ test('말끝 뒤의 숨소리를 흡수하지 않는다', () => {
     covered.at(-1).end <= breathFrom + Math.round(0.06 * SR),
     `숨소리를 ${(((covered.at(-1).end - breathFrom) / SR) * 1000).toFixed(0)}ms 삼켰다`,
   );
+  // 바닥이 실제로 이 판정을 하고 있다는 증거 — 바닥을 내리면 흡수된다. 이게 없으면
+  // 픽스처가 우연히 통과하는 것과 구분되지 않는다(12차에 되돌린 ZCR 가드가 그랬다).
+  const loose = coverQuietEdges(s, SR, found, { floorRatio: 0.02 });
+  assert.ok(
+    loose.at(-1).end > covered.at(-1).end,
+    '바닥을 내려도 결과가 같다 — 이 테스트는 바닥을 검증하지 않는다',
+  );
 });
 
-test('같은 레벨이어도 모음이면 흡수한다 (숨소리와 갈라진다)', () => {
-  // 위 테스트와 같은 배치인데 뒤가 숨소리가 아니라 조용한 모음이다. 레벨로만 판단하면
-  // 두 경우를 구분할 수 없다 — 이 테스트가 초록이어야 잡음 제거가 발화를 죽이지 않는다.
+test('바람소리(저역 럼블)를 흡수하지 않는다', () => {
+  const n = Math.round(1.2 * SR);
+  const s = noisy(n);
+  for (let i = 0; i < Math.round(0.4 * SR); i++) {
+    s[Math.round(0.1 * SR) + i] += 0.5 * Math.sin((2 * Math.PI * 220 * i) / SR);
+  }
+  // 저역 럼블은 스펙트럼 지표로는 발화와 갈라지지 않는다(저역통과가 판별 근거를
+  // 걷어낸다) — 레벨로만 막을 수 있다. -20.1dB.
+  const from = Math.round(0.56 * SR);
+  const wind = breath(Math.round(0.3 * SR), 0.08, 120);
+  for (let i = 0; i < wind.length; i++) s[from + i] += wind[i];
+
+  const covered = coverQuietEdges(s, SR, sliceSyllables(s, SR));
+  assert.ok(
+    covered.at(-1).end <= from + Math.round(0.06 * SR),
+    `바람소리를 ${(((covered.at(-1).end - from) / SR) * 1000).toFixed(0)}ms 삼켰다`,
+  );
+});
+
+test('숨소리보다 큰 조용한 발화는 흡수한다 (창이 좁다)', () => {
+  // 위 두 테스트와 같은 배치인데 꼬리가 잡음이 아니라 조용한 모음(-17dB)이다.
+  //
+  // **레벨이 유일한 축이므로 이 테스트와 위 두 개가 함께 바닥을 양쪽에서 조인다.**
+  // 숨소리(입으로 -23.7dB)와 조용한 조사(-18.4dB) 사이 여유가 5dB뿐이고, 이보다 조용한
+  // 발화는 잡음과 함께 버려진다 — 그게 이 기능의 한계이고 실기 판정이 택한 쪽이다.
   const n = Math.round(1.2 * SR);
   const s = noisy(n);
   for (let i = 0; i < Math.round(0.4 * SR); i++) {
@@ -223,13 +273,13 @@ test('같은 레벨이어도 모음이면 흡수한다 (숨소리와 갈라진�
   const tailTo = tailFrom + Math.round(0.2 * SR);
   for (let i = tailFrom; i < tailTo; i++) {
     const ph = (2 * Math.PI * 200 * (i - tailFrom)) / SR;
-    s[i] += (0.05 * (Math.sin(ph) + 0.5 * Math.sin(2 * ph))) / 1.5;
+    s[i] += (0.07 * (Math.sin(ph) + 0.5 * Math.sin(2 * ph))) / 1.5;
   }
   const found = sliceSyllables(s, SR);
   const covered = coverQuietEdges(s, SR, found);
   assert.ok(
     covered.at(-1).end >= tailTo - Math.round(0.04 * SR),
-    `조용한 모음이 ${(((tailTo - covered.at(-1).end) / SR) * 1000).toFixed(0)}ms 잘렸다`,
+    `조용한 발화가 ${(((tailTo - covered.at(-1).end) / SR) * 1000).toFixed(0)}ms 잘렸다`,
   );
 });
 
